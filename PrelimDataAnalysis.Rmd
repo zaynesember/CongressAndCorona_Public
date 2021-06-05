@@ -1,0 +1,352 @@
+---
+title: "Preliminary Data Analysis"
+output: html_notebook
+---
+
+```{r, message=FALSE}
+library(tidyverse)
+library(readr)
+library(here)
+library(datasets)
+library(lubridate)
+library(sjmisc)
+library(ggplot2)
+library(readxl)
+
+default_dir <- getwd()
+
+state.timezones <- data.frame(state.abb)
+UTC.conversion <- c(6,9,7,6,8,7,5,5,
+                   5,5,10,7,6,5,6,6,
+                   5,6,5,5,5,5,6,6,6,
+                   7,6,8,5,5,7,5,5,6,
+                   5,6,8,5,5,5,6,6,6,
+                   7,5,5,8,5,6,7)
+
+
+state.timezones$ET.conversion <- UTC.conversion - 5
+```
+
+
+```{r}
+# Returns a list of paths to .csv files within a parent directory for official
+# or campaign accounts (and always includes csv file paths with bio info)
+get_paths <- function(parent_dir, account_type){
+  setwd(parent_dir)
+  paths <- list.files(pattern = ".csv$", recursive = TRUE)
+  setwd(default_dir)
+  paths_filtered <- c()
+  
+  for(i in 1:length(paths)){
+    test <- grepl(account_type, paths[i]) || !(grepl("Official", paths[i]) || grepl("Campaign", paths[i]))
+    if(test){paths_filtered <- c(paths_filtered,paths[i])}
+  }
+
+  return(paths_filtered)
+}
+
+
+get_keyword_measures <- function(df, date_start, date_end){
+
+  # Create a list of all dates in the 
+  dates <- format(seq(as.Date(date_start),as.Date(date_end),by="days"), "%Y-%m-%d")
+
+  measures <- c()
+
+  for(d in dates){
+
+    dawn <- paste(d,"00:00:00")
+    dusk <- paste(d,"23:59:59")
+    
+    # Get subset of data for a given date
+    df.subset <- df %>% filter((date.time > as.POSIXct(dawn,tz="UTC")) & (date.time < as.POSIXct(dusk,tz="UTC")))
+    
+    # Get total number of keyword containing tweets for the day
+    num.keyword.tweets <- length(df.subset$tweet.text) # Can remove problem keywords here
+    
+    df.subset.covid.corona <- df.subset %>% filter(str_contains(df.subset$keywords,
+                                               c("covid","corona"),
+                                               logic="or"))
+    
+    num.covid.corona.tweets <- length(df.subset.covid.corona$tweet.text)
+
+    num.covid.corona.likes <- sum(df.subset.covid.corona$likes)
+
+    num.covid.corona.retweets <- sum(df.subset.covid.corona$retweets)
+    
+    
+    df.subset.covid.corona.sd <- df.subset %>% filter(str_contains(df.subset$keywords,
+                                                   c("covid","corona","social distance"),
+                                                   logic="or"))
+    
+    num.covid.corona.sd.tweets <- length(df.subset.covid.corona.sd$tweet.text)
+    
+    num.covid.corona.sd.likes <- sum(df.subset.covid.corona.sd$likes)
+    
+    num.covid.corona.sd.retweets <- sum(df.subset.covid.corona.sd$retweets)
+    
+    
+    df.subset.sd <- df.subset %>% filter(str_contains(df.subset$keywords,
+                                                   "social distance"))
+
+    num.sd.tweets <- length(df.subset.sd$tweet.text)
+    
+    num.sd.likes <- sum(df.subset.sd$likes)
+    
+    num.sd.retweets <- sum(df.subset.sd$retweets)    
+    
+    measures <- rbind(measures,c(d,num.covid.corona.tweets,num.covid.corona.likes,
+                                 num.covid.corona.retweets,
+                                 num.covid.corona.sd.tweets,num.covid.corona.sd.likes,
+                                 num.covid.corona.sd.retweets,num.sd.tweets,num.sd.likes,
+                                 num.sd.retweets))
+    
+    
+  }
+  
+  colnames(measures) = c("date","num.covid.corona.tweets","num.covid.corona.likes",
+                         "num.covid.corona.retweets","num.covid.corona.sd.tweets",
+                         "num.covid.corona.sd.likes","num.covid.corona.sd.retweets",
+                         "num.sd.tweets","num.sd.likes","num.sd.retweets")
+  return(measures)
+  
+}
+
+#agg_test <- get_keyword_measures(na.omit(test),date_start="2020-01-20", date_end="2020-11-29")
+
+```
+
+```{r, message=FALSE}
+
+paths <- get_paths(parent_dir="Data/COVID_keywords_Jan_to_Nov", account_type="Official")
+paths2 <- get_paths(parent_dir="Data/COVID_keywords_Jan_to_Nov", account_type="Campaign")
+
+# Takes in a list of CSV paths within some parent directory, returns a dataframe
+# with needed aggregate measures for each member
+make_dataframe <- function(paths, parent_dir, date_start, date_end){
+  
+  df_all <- rep(NA,24)
+  last_bio_info <- c()
+  
+  for(path in paths){
+
+    path <- paste(parent_dir,path,sep="/")
+
+    data <- read_csv(path,col_names=F)
+    
+    #data <- read.csv(path)
+
+    if(is.null(data)){
+      data <- c()
+    }
+    
+    if(!(str_detect(path,"Official") || str_detect(path,"Campaign"))){
+      # bio info
+      if(grepl("House",path)){chamber="House"}
+      
+      else if(grepl("Senate",path)){chamber="Senate"}
+      
+      # name, official handle, campaign handle, county icpsr, state icpsr, district,
+      # state abb, party code, year born, dw nom dim 1, dw nom dim 2, 
+      # career start,career end, chamber
+      last_bio_info <- c(data,chamber)
+      
+ 
+    }
+    else{
+      # datetimes are in EST . . . ugh
+      state = substr(str_extract(path,"/[A-Z][A-Z]_"),2,3)
+      timezone_conversion <- state.timezones$ET.conversion[state.timezones$state.abb==state]
+      print(path)
+      if(nrow(data)!=0){
+
+        names <- c("tweet.text","date.time","client","retweets","likes","keywords")
+
+        df <- data.frame(data)
+        
+        #View(df)
+        colnames(df) <- names
+        
+        # First convert to datetime format and to the MC's state timezone (or
+        # timezone covering most of their state). if else for different date
+        # formats
+        
+        str_dates <- df$date.time
+        
+        if(is.na(strptime(str_dates[1],
+                        format="%Y-%m-%d %R:%S")-hours(timezone_conversion))){
+          df$date.time <- strptime(str_dates,
+                format="%m/%d/%Y %R")-hours(timezone_conversion)
+        }
+        else{
+          df$date.time <- strptime(str_dates,
+                        format="%Y-%m-%d %R:%S")-hours(timezone_conversion)
+        }
+
+        
+        # Get rid of empty columns
+        emptycols <- sapply(df, function (k) all(is.na(k)))
+      
+        df <- df[!emptycols]
+        
+    
+        df_agg <- get_keyword_measures(df,date_start,date_end)
+        individual_data <- data.frame(df_agg,last_bio_info)
+        
+        names(individual_data)[11:24] <- c("name", "campaign.account", 
+                                           "personal.account", "county.icpsr",
+                                           "state.icpsr", "district",
+                                           "state.abb", "party.code",
+                                           "year.born", "dwnom.dim1",
+                                           "dwnom.dim2", "career.start",
+                                           "career.end", "chamber")
+                                           
+
+        df_all <- rbind(df_all,individual_data)
+
+      }
+    }
+  }
+  df_all[2:10] <- sapply(df_all[2:10],as.numeric)
+  df_all <- data.frame(df_all)
+  return(df_all[-1,])
+}
+
+setwd(default_dir)
+
+data.official.covid <- make_dataframe(paths, parent_dir="Data/COVID_keywords_Jan_to_Nov",
+                       date_start="2020-01-20", date_end="2020-11-29")
+data.campaign.covid <- make_dataframe(paths2, parent_dir="Data/COVID_keywords_Jan_to_Nov",
+                       date_start="2020-01-20", date_end="2020-11-29")
+# data.official.covid <- make_dataframe(c("Senate/AK_DanSullivan/AK_DanSullivan.csv","Senate/AK_DanSullivan/Official/SenDanSullivan_2020-01-20_to_2020-11-29.csv"), parent_dir="Data/COVID_keywords_Jan_to_Nov",
+#                        date_start="2020-01-20", date_end="2020-11-29")
+
+# LOOK INTO PARSING ERRORS
+
+```
+
+```{r}
+#FINISH MERGING
+Senate2020 <- read.csv("Auxiliary Data/Senate2020Election/1976-2020-senate.csv") %>%
+  filter(year==2020) #%>% group_by(state) %>% slice_max(candidatevotes)
+
+Senate2020$percent.won <- round(Senate2020$candidatevotes/Senate2020$totalvotes,4)
+
+Senate2020$party_detailed[34] <- "REPUBLICAN"
+Senate2020$party_simplified[34] <- "REPUBLICAN"
+
+Senate2020 <- Senate2020 %>% filter(party_detailed == "REPUBLICAN" | party_detailed == "DEMOCRAT")
+```
+
+
+```{r}
+covid.CD <- read_excel("Auxiliary Data/HarvardCOVID/COVIDbyCD.xlsx")
+colnames(covid.CD)[which(names(covid.CD) == "Date")] <- "date"
+colnames(covid.CD)[which(names(covid.CD) == "StateAbbreviation")] <- "state.abb"
+colnames(covid.CD)[which(names(covid.CD) == "Congressional District")] <- "district"
+
+covid.CD[c(2,5,6,7)] <- sapply(covid.CD[c(2,5,6,7)],as.numeric)
+```
+
+```{r}
+twitter.house <- data.official.covid %>% filter(chamber=="House")
+
+twitter.house <- left_join(x=twitter.house, y=covid.CD, by=c("date","state.abb","district"))
+```
+
+```{r}
+
+ggplot(twitter.house) +
+  geom_line(aes(x=date,y=num.covid.corona.tweets), size=0.1)
+
+ggplot(twitter.house) +
+  geom_line(aes(x=date,y=incremental_cases), size=0.1)
+
+# qqnorm(cases.tweets.all$residuals, pch = 1, frame = FALSE)
+# qqline(cases.tweets.all$residuals, col = "red", lwd = 2)
+#plot(density(cases.tweets.all$residuals))
+```
+
+```{r}
+#df_by_member$party.code <- ifelse(df_by_member$party.code==100,1,0)
+
+model1.data <- twitter.house
+model1.data$party.code <- ifelse(model1.data$party.code==100,1,0) #ADDRESS THIRD PARTY
+model1.data$incremental_cases <- lag(model1.data$incremental_cases,1)/100
+model1.data$incremental_deaths <- lag(model1.data$incremental_deaths,5)/100
+
+# Regressing on lagged cases
+model1 <- glm(num.covid.corona.tweets ~ incremental_cases + party.code + dwnom.dim1, family="poisson",data=model1.data)
+
+summary(model1)
+
+# Regressing on lagged deaths
+model2 <- glm(num.covid.corona.tweets ~ incremental_deaths + party.code + dwnom.dim1, family="poisson",data=model1.data)
+
+summary(model2)
+```
+
+```{r}
+# TESTING AGGREGATE TWEET DATA WITH ELECTORAL MARGINS FOR SENATE
+#twitter.senate.official <- data.official.covid %>% filter(chamber=="Senate")
+twitter.senate.official <- data.official.covid %>% filter(chamber=="Senate") %>%
+  group_by(name) %>% 
+  summarize(num.tweets = sum(num.covid.corona.tweets + num.sd.tweets),
+            num.retweets = sum(num.covid.corona.retweets + num.sd.retweets),
+            num.likes = sum(num.covid.corona.likes + num.sd.likes),
+            state.icpsr = first(state.icpsr), state.abb=first(state.abb),
+            party.code = first(party.code), year.born = first(year.born),
+            dwnom.dim1 = first(dwnom.dim1), dwnom.dim2 = first(dwnom.dim2),
+            career.start = first(career.start))
+
+twitter.senate.campaign <- data.campaign.covid %>% filter(chamber=="Senate") %>%
+    group_by(name) %>% 
+  summarize(num.tweets = sum(num.covid.corona.tweets + num.sd.tweets),
+            num.retweets = sum(num.covid.corona.retweets + num.sd.retweets),
+            num.likes = sum(num.covid.corona.likes + num.sd.likes),
+            state.icpsr = first(state.icpsr), state.abb=first(state.abb),
+            party.code = first(party.code), year.born = first(year.born),
+            dwnom.dim1 = first(dwnom.dim1), dwnom.dim2 = first(dwnom.dim2),
+            career.start = first(career.start))
+
+Senate2020Ballotpedia <- read_excel("Auxiliary Data/Senate2020Election/BallotpediaSenateData2020.xlsx")
+
+# FIX THIS MERGE
+merged <- left_join(twitter.senate.official, Senate2020Ballotpedia)
+
+# LOOK AT DIFFERENCE BETWEEN CAMPAIGN AND OFFICIAL TWEET FREQ
+```
+```{r}
+# Compare campaign and official
+twitter.senate.compare <- left_join(twitter.senate.official, twitter.senate.campaign, by="name")
+```
+```{r}
+# LOOKING AT STATE LEVEL
+covid_by_state <- read_csv("Auxiliary Data/CDC/covid_by_state.csv")
+
+covid_by_state$date <- strptime(covid_by_state$date,
+                        format="%m/%e/%Y")
+
+covid_by_state <- covid_by_state %>% select(date, state.abb, new_case, new_death)
+
+data.official.covid$date <- strptime(data.official.covid$date,
+                                     format="%F")
+
+senate.official.CDC <- left_join(data.official.covid %>% filter(chamber=="Senate"),
+                                 covid_by_state, by=c("state.abb", "date"))
+
+senate.official.CDC$total.tweets <- senate.official.CDC$num.covid.corona.tweets + senate.official.CDC$num.sd.tweets
+
+```
+
+```{r}
+library(AER)
+library(quantmod)
+library(dynlm)
+library(orcutt)
+library(nlme)
+
+dynam_reg <- dynlm(total.tweets ~ new_death + lag(new_death, 2), data=senate.official.CDC)
+coeftest(dynam_reg, vcov. = vcovHAC)
+```
+
