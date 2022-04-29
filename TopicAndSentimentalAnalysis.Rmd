@@ -1,0 +1,327 @@
+---
+title: "Topic and Sentiment Analysis"
+author: "Zayne Sember"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(topicmodels)
+library(tidytext)
+library(stringr)
+```
+
+Following along with https://www.tidytextmining.com/tidytext.html 
+```{r}
+# WORD COUNT FOR ALL OF CONGRESS
+
+# Make it into a tibble
+text_df <- tibble(line=1:length(data.text.official.covid.all$tweet.text),
+                  text=data.text.official.covid.all$tweet.text)
+
+# Convert to one-token-per-document-per-row
+# word is output column name, text is the original text; pipe in table to store # data in
+text_df <- text_df %>% 
+  unnest_tokens(word, text)
+
+drop_words <- data.frame(c("t.co","https","twitter","iphone",
+                         "web", "tweetdeck", "amp", "app", " ", "",
+                         "20", " 20"))
+colnames(drop_words) <- c("word")
+
+# NEED TO THINK THROUGH WHICH WORDS TO DISCARD AND HOW EXACTLY
+# TO DO IT MORE CAREFULLY
+text_df <- text_df %>% 
+  anti_join(stop_words) %>%
+  anti_join(drop_words)
+
+text_df$word <- sapply(text_df$word,str_remove,c("[:digit:][:digit:]"))
+
+text_df %>%
+  count(word, sort = TRUE) %>%
+  filter(n > 15000) %>%
+  filter(word != "20") %>%
+  filter(word != "") %>%
+  filter(word != "it's") %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word)) +
+  geom_col(fill="purple4") +
+  labs(x = "Mentions", y="") +
+  ggtitle("Most Tweeted Words by the 116th Congress\n(Jan-Nov 2020)") +
+  theme_bw()
+```
+
+```{r}
+text_df.state <- split(data.text.official.covid.all, data.text.official.covid.all$state.abb)
+
+
+
+tibble_counter <- function(list){
+  drop_words <- data.frame(c("t.co","https","twitter","iphone",
+                         "web", "tweetdeck", "amp", "app", " ", "",
+                         "20", " 20"))
+  colnames(drop_words) <- c("word")
+  retVal <- NA
+  state <- NA
+  i <- 0
+  for(df in list){
+    state <- df$state.abb[1]
+    t <- tibble(line=1:length(df$tweet.text), text=df$tweet.text)
+    if(i <- 0){
+      retVal <- cbind(t, state.abb = rep(state, length(t$line)))
+    }
+    else{
+      retVal <- rbind(retVal, cbind(t, state.abb = rep(state, length(t$line))))
+    }
+    
+    i <- i + 1
+    
+  }
+  
+  retVal <- retVal[2:length(retVal$state.abb),]
+  
+  retVal <- split(retVal, retVal$state.abb)
+  
+  top_words <- data.frame(state.abb=NA, top.word=NA)
+  for(r in retVal){
+    r_un <- unnest_tokens(r, word, text)
+
+    r_un$word <- sapply(r_un$word,str_remove,c("[:digit:][:digit:]"))
+    r_un <- r_un %>%
+      anti_join(stop_words) %>%
+      anti_join(drop_words) %>%
+      count(word, sort=T) %>%
+      mutate(word = reorder(word, n))
+    r_un$state.abb <- rep(r$state.abb[1], length(r_un$word))
+    cat(r_un$state.abb[1], ": ", toString(r_un$word[1]))
+    
+    top_words <- rbind(c(r_un$state.abb[1],toString(r_un$word[1])))
+  }
+  
+  return(top_words)
+}
+
+text_df.state <- tibble_counter(text_df.state)
+#text_df.state[1]
+```
+
+
+```{r}
+# WORD COUNT FOR BY PARTY
+
+# DEMOCRATS
+ddf <- data.text.official.covid.all %>%
+  filter(party.code==100 | party.code==329)
+
+# Make it into a tibble
+text_ddf <- tibble(line=1:length(ddf$tweet.text),text=ddf$tweet.text)
+
+# Convert to one-token-per-document-per-row
+# word is output column name, text is the original text; pipe in table to store # data in
+text_ddf <- text_ddf %>% 
+  unnest_tokens(word, text)
+
+drop_words <- data.frame(c("t.co","https","twitter","iphone",
+                         "web", "tweetdeck", "amp", "app", " ", "",
+                         "20", " 20"))
+colnames(drop_words) <- c("word")
+
+# NEED TO THINK THROUGH WHICH WORDS TO DISCARD AND HOW EXACTLY
+# TO DO IT MORE CAREFULLY
+text_ddf <- text_ddf %>% 
+  anti_join(stop_words) %>%
+  anti_join(drop_words)
+
+text_ddf$word <- sapply(text_ddf$word,str_remove,c("[:digit:][:digit:]"))
+
+text_ddf %>%
+  count(word, sort = TRUE) %>%
+  filter(n > 12000) %>%
+  filter(word != "20") %>%
+  filter(word != "") %>%
+  filter(word != "it's") %>%
+  filter(word != "i'm") %>%
+  filter(word != "2") %>%
+  filter(word != "1") %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word)) +
+  geom_col(fill="darkblue") +
+  labs(x = "Mentions", y="") +
+  ggtitle("Most Tweeted Words by Democrats of the\n116th Congress (Jan-Nov 2020)") +
+  theme_bw()
+```
+```{r}
+# WORD COUNT FOR BY PARTY
+
+# DEMOCRATS
+rdf <- data.text.official.covid.all %>%
+  filter(party.code==200 | party.code==331)
+
+# Make it into a tibble
+text_rdf <- tibble(line=1:length(rdf$tweet.text),
+                  text=rdf$tweet.text)
+
+# Convert to one-token-per-document-per-row
+# word is output column name, text is the original text; pipe in table to store # data in
+text_rdf <- text_rdf %>% 
+  unnest_tokens(word, text)
+
+drop_words <- data.frame(c("t.co","https","twitter","iphone",
+                         "web", "tweetdeck", "amp", "app", " ", "",
+                         "20", " 20"))
+colnames(drop_words) <- c("word")
+
+# NEED TO THINK THROUGH WHICH WORDS TO DISCARD AND HOW EXACTLY
+# TO DO IT MORE CAREFULLY
+text_rdf <- text_rdf %>% 
+  anti_join(stop_words) %>%
+  anti_join(drop_words)
+
+text_rdf$word <- sapply(text_rdf$word,str_remove,c("[:digit:][:digit:]"))
+
+text_rdf %>%
+  count(word, sort = TRUE) %>%
+  filter(n > 5000) %>%
+  filter(word != "20") %>%
+  filter(word != "") %>%
+  filter(word != "it's") %>%
+  filter(word != "i'm") %>%
+  filter(word != "2") %>%
+  filter(word != "1") %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word)) +
+  geom_col(fill="darkred") +
+  labs(x = "Mentions", y="") +
+  ggtitle("Most Tweeted Words by Republicans of the\n116th Congress (Jan-Nov 2020)") +
+  theme_bw()
+```
+```{r}
+# WORD COUNT FOR BY CHAMBER
+
+# Senate
+sdf <- data.text.official.covid.all %>%
+  filter(chamber=="Senate")
+
+# Make it into a tibble
+text_sdf <- tibble(line=1:length(sdf$tweet.text),
+                  text=sdf$tweet.text)
+
+# Convert to one-token-per-document-per-row
+# word is output column name, text is the original text; pipe in table to store # data in
+text_sdf <- text_sdf %>% 
+  unnest_tokens(word, text)
+
+drop_words <- data.frame(c("t.co","https","twitter","iphone",
+                         "web", "tweetdeck", "amp", "app", " ", "",
+                         "20", " 20"))
+colnames(drop_words) <- c("word")
+
+# NEED TO THINK THROUGH WHICH WORDS TO DISCARD AND HOW EXACTLY
+# TO DO IT MORE CAREFULLY
+text_sdf <- text_sdf %>% 
+  anti_join(stop_words) %>%
+  anti_join(drop_words)
+
+text_sdf$word <- sapply(text_sdf$word,str_remove,c("[:digit:][:digit:]"))
+
+text_sdf %>%
+  count(word, sort = TRUE) %>%
+  filter(n > 5000) %>%
+  filter(word != "20") %>%
+  filter(word != "") %>%
+  filter(word != "it's") %>%
+  filter(word != "i'm") %>%
+  filter(word != "2") %>%
+  filter(word != "1") %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word)) +
+  geom_col(fill="darkorange") +
+  labs(x = "Mentions", y="") +
+  ggtitle("Most Tweeted Words by 116th Senate (Jan-Nov 2020)") +
+  theme_bw()
+```
+```{r}
+# WORD COUNT FOR BY CHAMBER
+
+# House
+hdf <- data.text.official.covid.all %>%
+  filter(chamber=="Senate")
+
+# Make it into a tibble
+text_hdf <- tibble(line=1:length(hdf$tweet.text),
+                  text=hdf$tweet.text)
+
+# Convert to one-token-per-document-per-row
+# word is output column name, text is the original text; pipe in table to store # data in
+text_hdf <- text_hdf %>% 
+  unnest_tokens(word, text)
+
+drop_words <- data.frame(c("t.co","https","twitter","iphone",
+                         "web", "tweetdeck", "amp", "app", " ", "",
+                         "20", " 20"))
+colnames(drop_words) <- c("word")
+
+# NEED TO THINK THROUGH WHICH WORDS TO DISCARD AND HOW EXACTLY
+# TO DO IT MORE CAREFULLY
+text_hdf <- text_sdf %>% 
+  anti_join(stop_words) %>%
+  anti_join(drop_words)
+
+text_hdf$word <- sapply(text_hdf$word,str_remove,c("[:digit:][:digit:]"))
+
+text_hdf %>%
+  count(word, sort = TRUE) %>%
+  filter(n > 4000) %>%
+  filter(word != "20") %>%
+  filter(word != "") %>%
+  filter(word != "it's") %>%
+  filter(word != "i'm") %>%
+  filter(word != "2") %>%
+  filter(word != "1") %>%
+  filter(word != ",") %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word)) +
+  geom_col(fill="darkgreen") +
+  labs(x = "Mentions", y="") +
+  ggtitle("Most Tweeted Words by 116th House (Jan-Nov 2020)") +
+  theme_bw()
+```
+
+
+```{r}
+library(janeaustenr)
+# Use mutate to get linenumbers and regex to find chapter beginnings
+original_books <- austen_books() %>% 
+  group_by(book) %>% 
+  mutate(linenumber=row_number(),
+         chapter=cumsum(str_detect(text,
+                                   regex("^chapter [\\divxlc]",
+                                         ignore_case=T)))) %>% 
+           ungroup()
+
+# Put into one token per row format
+tidy_books <- original_books %>% 
+  unnest_tokens(word, text)
+
+# Now remove stop words
+tidy_books <- tidy_books %>% 
+  anti_join(stop_words)
+
+# Can use count() to find most common words, then plot
+tidy_books %>% count(word, sort=T)
+
+tidy_books %>%
+  count(word, sort = TRUE) %>%
+  filter(n > 600) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word)) +
+  geom_col() +
+  labs(y = NULL)
+```
+
+Now giving it a whirl with real data
+```{r}
+
+```
+

@@ -1,0 +1,470 @@
+---
+title: "Topic Analysis"
+author: "Zayne Sember"
+output: html_notebook
+---
+
+```{r, message=FALSE, warn=FALSE}
+library(tidyverse)
+library(lubridate)
+library(gridExtra)
+library(zoo)
+library(forecast)
+library(topicmodels)
+library(tidytext)
+library(textmineR)
+library(tm)
+library(sjmisc)
+```
+
+Fix missing names
+```{r}
+data.text.official.covid.all <- data.text.official.covid.all %>% 
+  mutate(name=case_when(
+    campaign.account == "SpeakerPelosi" ~ "Nancy Pelosi",
+    campaign.account == "RepBarragan" ~ "Nanette Barragán",
+    TRUE ~ name
+  ))
+```
+
+For reference
+```{r}
+data.text.official.covid.all %>% 
+  filter(name=="Nancy Pelosi") %>% 
+  select(tweet.text) %>% View()
+```
+
+
+Topic modeling with all pandemic tweets
+References:
+https://towardsdatascience.com/beginners-guide-to-lda-topic-modelling-with-r-e57a5a8e7a25
+https://www.tidytextmining.com/topicmodeling.html
+```{r}
+data.text.official.covid.all$ID <-seq.int(nrow(data.text.official.covid.all))
+
+pandemic_tweets <- data.text.official.covid.all %>% 
+  select(tweet.text)
+pandemic_tweets$ID <- seq.int(nrow(pandemic_tweets))
+
+
+pandemic_tweets$tweet.text <- gsub("@\\w+", "", pandemic_tweets$tweet.text)
+pandemic_tweets$tweet.text <- gsub("https://t.co/[a-zA-Z0-9]*{10}", 
+                                 "", pandemic_tweets$tweet.text)
+pandemic_tweets$tweet.text <- str_replace_all(pandemic_tweets$tweet.text, "&amp", "and")
+pandemic_tweets$tweet.text <- gsub("[[:punct:]]", "", pandemic_tweets$tweet.text)
+pandemic_tweets$tweet.text <- gsub("[[:digit:]]", "", pandemic_tweets$tweet.text)
+pandemic_tweets$tweet.text <- gsub(" ’", "", pandemic_tweets$tweet.text)
+pandemic_tweets$tweet.text <- gsub("’ ", "", pandemic_tweets$tweet.text)
+pandemic_tweets$tweet.text <- gsub("[[:digit:]]", "", pandemic_tweets$tweet.text)
+pandemic_tweets$tweet.text <- gsub("[^\x01-\x7F]", "", pandemic_tweets$tweet.text) # remove emojis
+pandemic_tweets$tweet.text <- str_to_lower(pandemic_tweets$tweet.text)
+pandemic_tweets$tweet.text <- str_trim(pandemic_tweets$tweet.text, "both")
+
+pt <- pandemic_tweets %>% unnest_tokens(word, tweet.text) %>% anti_join(stop_words)
+
+# stem the words
+pt$word <- stemDocument(pt$word, language="english")
+```
+# RUNS INTO ERROR
+```{r}
+# dtm <- CreateDtm(pt$word, doc_names=pt$ID, ngram_window=c(1,2))
+# 
+# tf <- TermDocFreq(dtm=dtm)
+# 
+# original_tf <- tf %>% select(term, term_freq, doc_freq)
+# rownames(original_tf) <- 1:nrow(original_tf)
+# 
+# vocabulary <- tf$term[ tf$term_freq > 1 & tf$doc_freq < nrow(dtm) / 2 ]
+# dtm = dtm
+# 
+# k_list <- seq(1, 5, by = 1)
+# model_dir <- paste0("models_", digest::digest(vocabulary, algo = "sha1"))
+# if (!dir.exists(model_dir)) dir.create(model_dir)
+# model_list <- TmParallelApply(X = k_list, FUN = function(k){
+#   filename = file.path(model_dir, paste0(k, "_topics.rda"))
+#   
+#   if (!file.exists(filename)) {
+#     m <- FitLdaModel(dtm = dtm, k = k, iterations = 500)
+#     m$k <- k
+#     m$coherence <- CalcProbCoherence(phi = m$phi, dtm = dtm, M = 5)
+#     save(m, file = filename)
+#   } else {
+#     load(filename)
+#   }
+#   
+#   m
+# }, export=c("dtm", "model_dir")) # export only needed for Windows machines
+# #model tuning
+# #choosing the best model
+# coherence_mat <- data.frame(k = sapply(model_list, function(x) nrow(x$phi)), 
+#                             coherence = sapply(model_list, function(x) mean(x$coherence)), 
+#                             stringsAsFactors = FALSE)
+# ggplot(coherence_mat, aes(x = k, y = coherence)) +
+#   geom_point() +
+#   geom_line(group = 1)+
+#   ggtitle("Best Topic by Coherence Score") + theme_minimal() +
+#   scale_x_continuous(breaks = seq(1,20,1)) + ylab("Coherence")
+# 
+# model <- model_list[which.max(coherence_mat$coherence)][[ 1 ]]
+# model$top_terms <- GetTopTerms(phi = model$phi, M = 20)
+# top20_wide <- as.data.frame(model$top_terms)
+# 
+# model$topic_linguistic_dist <- CalcHellingerDist(model$phi)
+# model$hclust <- hclust(as.dist(model$topic_linguistic_dist), "ward.D")
+# model$hclust$labels <- paste(model$hclust$labels, model$labels[ , 1])
+# plot(model$hclust)
+```
+
+Trying again with this guide:
+https://rpubs.com/Argaadya/topic_lda
+```{r}
+# Data Wrangling
+library(tidyverse)
+
+# Text Processing
+library(tm)
+library(corpus)
+library(tidytext)
+#library(textclean)
+library(lubridate)
+library(hunspell)
+library(SnowballC)
+library(textmineR)
+library(scales)
+
+# Visualization
+library(ggwordcloud)
+
+# Modeling and Evaluation
+#library(randomForest)
+library(e1071)
+library(yardstick)
+
+options(scipen = 999)
+```
+
+```{r}
+pt2 <- pt %>% count(ID, word)
+   
+dtm <- pt2 %>% 
+   cast_dtm(document = ID, term = word, value = n)
+```
+
+```{r}
+word_freq <- findFreqTerms(dtm, 
+                           lowfreq = 500, 
+                           highfreq = nrow(dtm)*0.9
+                           ) # NOTE THE LOW FREQ IS SET REALLY HIGH
+
+dtm <- dtm[ , word_freq]
+dtm
+```
+
+
+```{r}
+#dtm_lda <- Matrix::Matrix(as.matrix(dtm), sparse = T)
+
+dtm_lda <- Matrix::sparseMatrix(i=dtm$i, 
+                           j=dtm$j, 
+                           x=dtm$v, 
+                           dims=c(dtm$nrow, dtm$ncol),
+                           dimnames = dtm$dimnames)
+```
+
+TOPIC MODELS THAT TAKE FOREVER TO RUN
+```{r}
+set.seed(123)
+lda3 <- FitLdaModel(dtm = dtm_lda, 
+                        k = 3, 
+                        iterations = 5000,
+                        burnin = 4000, 
+                        calc_coherence = T
+                        )
+
+lda5 <- FitLdaModel(dtm = dtm_lda, 
+                        k = 5, 
+                        iterations = 5000,
+                        burnin = 4000, 
+                        calc_coherence = T
+                        )
+
+lda10 <- FitLdaModel(dtm = dtm_lda, 
+                        k = 10, 
+                        iterations = 5000,
+                        burnin = 4000, 
+                        calc_coherence = T
+                        )
+```
+
+
+
+
+RUNNING WITH 3 TOPICS
+```{r}
+
+lda3$theta %>% 
+   head() %>% 
+   as.data.frame() %>% 
+   set_names(paste("Topic", 1:3)) %>%
+   rownames_to_column("document")
+
+GetTopTerms(lda3$phi, 20) %>%
+   as.data.frame() %>% 
+   #set_names(paste("Topic", 1:3))
+   set_names(c('COVID and COVID Relief', 'Governance','COVID info'))
+
+GetTopTerms(lda3$phi, 30) %>%
+   as.data.frame() %>% 
+   set_names(c('COVID Effects and Relief', 'Governance','COVID Resources')) %>% 
+   rownames_to_column("id") %>%
+   mutate(id = as.numeric(id)) %>% 
+   pivot_longer(-id, names_to = "topic", values_to = "term") %>% 
+   ggplot(aes(label = term, size = rev(id), color = topic, alpha = rev(id))) +
+   geom_text_wordcloud(seed = 123) +
+   facet_wrap(~topic, scales = "free") +
+   scale_alpha_continuous(range = c(0.4, 1)) +
+   scale_color_manual(values = c( "dodgerblue4", "firebrick4", "darkgreen")) +
+   theme_minimal() +
+   theme(strip.background = element_rect(fill = "firebrick"),
+         strip.text.x = element_text(colour = "white"))
+```
+ASSESSING THE MODEL
+```{r}
+lda3.topic <- lda3$theta %>% 
+  as.data.frame() %>% 
+  rownames_to_column("ID") %>% 
+  mutate(ID = as.integer(ID)) %>%
+  mutate(topic = apply(.[,2:4], 1, function(x) names(x)[which.max(x)])) %>% 
+  left_join(pandemic_tweets) %>%
+  rename(tweet.text.clean = tweet.text) %>% 
+  left_join(data.text.official.covid.all, by="ID")
+
+lda3.topic.count <- lda3.topic %>% 
+  group_by(date) %>% 
+  count(topic)
+
+lda3.topic.count %>% group_by(topic) %>%
+  summarize(total=sum(n)) %>% 
+  mutate(percent=round(100*total/346829,1))
+
+
+#ggplot(lda3.topic.count, aes(x=date, y=rollmean(n, 2, na.pad=T), color=topic)) + 
+ggplot(lda3.topic.count, aes(x=date, y=n, color=topic)) + 
+  geom_line() +
+  facet_wrap(~ topic, labeller = as_labeller(c("t_1" = "COVID Effects and Relief",
+                                            "t_2" = "Governance",
+                                            "t_3" = "COVID Resources"))) +
+  xlab("") +
+  ylab("Daily tweet count") +
+  ggtitle("3 Topic Model") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  theme_bw() +
+  theme(legend.position="none",
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=7))
+  
+  
+```
+
+
+RUNNING WITH 5 TOPICS
+```{r}
+set.seed(123)
+
+lda5$theta %>% 
+   head() %>% 
+   as.data.frame() %>% 
+   set_names(paste("Topic", 1:5)) %>%
+   rownames_to_column("document")
+
+GetTopTerms(lda5$phi, 20) %>%
+   as.data.frame() %>% 
+   set_names(paste("Topic", 1:5))
+
+GetTopTerms(lda5$phi, 30) %>%
+   as.data.frame() %>% 
+   set_names(c('Legislation and Governance', 
+               'COVID and the Economy',
+               'Technology',
+               'COVID Resources',
+               'Honoring and Celebration')) %>% 
+   rownames_to_column("id") %>%
+   mutate(id = as.numeric(id)) %>% 
+   pivot_longer(-id, names_to = "topic", values_to = "term") %>% 
+   ggplot(aes(label = term, size = rev(id), color = topic, alpha = rev(id))) +
+   geom_text_wordcloud(seed = 123) +
+   facet_wrap(~topic, scales = "free") +
+   scale_alpha_continuous(range = c(0.4, 1)) +
+   scale_color_manual(values = c( "dodgerblue4", "firebrick4", "darkgreen", "purple4", "black")) +
+   theme_minimal() +
+   theme(strip.background = element_rect(fill = "firebrick"),
+         strip.text.x = element_text(colour = "white"))
+```
+ASSESSING THE MODEL
+```{r}
+lda5.topic <- lda5$theta %>% 
+  as.data.frame() %>% 
+  rownames_to_column("ID") %>% 
+  mutate(ID = as.integer(ID)) %>%
+  mutate(topic = apply(.[,2:6], 1, function(x) names(x)[which.max(x)])) %>% 
+  left_join(pandemic_tweets) %>%
+  rename(tweet.text.clean = tweet.text) %>% 
+  left_join(data.text.official.covid.all, by="ID")
+
+lda5.topic.count <- lda5.topic %>% 
+  group_by(date) %>% 
+  count(topic)
+
+lda5.topic.count %>% group_by(topic) %>%
+  summarize(total=sum(n)) %>% 
+  mutate(percent=round(100*total/346829,1))
+
+
+#ggplot(lda5.topic.count, aes(x=date, y=rollmean(n, 30, na.pad=T), color=topic)) + 
+ggplot(lda5.topic.count, aes(x=date, y=n, color=topic)) + 
+  geom_line() +
+  facet_wrap(~ topic, labeller = as_labeller(c('t_1'='Legislation and Governance', 
+                                               't_2'='COVID and the Economy',
+                                               't_3'='Technology',
+                                               't_4'='COVID Resources',
+                                               't_5'='Honoring and Celebration'))) +
+  xlab("") +
+  ylab("Daily tweet count") +
+  ggtitle("5 Topic Model") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  theme_bw() +
+  theme(legend.position="none",
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=7))
+  
+  
+```
+
+RERUN WITH 10 TOPICS
+```{r}
+set.seed(123)
+
+
+lda10$theta %>% 
+   head() %>% 
+   as.data.frame() %>% 
+   set_names(paste("Topic", 1:10)) %>%
+   rownames_to_column("document")
+
+GetTopTerms(lda10$phi, 20) %>%
+   as.data.frame() %>% 
+   set_names(paste("Topic", 1:10))
+
+
+GetTopTerms(lda10$phi, 15) %>%
+   as.data.frame() %>% 
+   # set_names(c("Governance", "Civil Rights", "COVID and Education",
+   #             "Legislation", "COVID Spread", "Economy, Energy, and Climate",
+   #             "Technology and Voting", "Honoring and Celebration", "COVID Relief",
+   #             "COVID Resources")) %>%
+   rownames_to_column("id") %>%
+   mutate(id = as.numeric(id)) %>% 
+   pivot_longer(-id, names_to = "topic", values_to = "term") %>% 
+   ggplot(aes(label = term, size = rev(id), color = topic, alpha = rev(id))) +
+   geom_text_wordcloud(seed = 123) +
+   facet_wrap(~topic, scales = "free", 
+              labeller = as_labeller(c("t_1"="Governance", 
+                                      "t_10"="Civil Rights", 
+                                      "t_2"="COVID and Education",
+                                      "t_3"="COVID and Legislation", 
+                                      "t_4"="COVID Spread", 
+                                      "t_5"="Economy, Energy, and Climate",
+                                      "t_6"="Technology and Voting", 
+                                      "t_7"="Honoring and Celebration",
+                                      "t_8"="COVID Relief",
+                                      "t_9"="COVID Resources"))) +
+   scale_alpha_continuous(range = c(0.4, 1))
+   theme_minimal() +
+   theme(strip.background = element_rect(fill = "firebrick"),
+         strip.text.x = element_text(colour = "white"))
+
+```
+```{r}
+lda10.topic <- lda10$theta %>% 
+  as.data.frame() %>% 
+  rownames_to_column("ID") %>% 
+  mutate(ID = as.integer(ID)) %>%
+  mutate(topic = apply(.[,2:11], 1, function(x) names(x)[which.max(x)])) %>% 
+  left_join(pandemic_tweets) %>%
+  rename(tweet.text.clean = tweet.text) %>% 
+  left_join(data.text.official.covid.all, by="ID")
+
+lda10.topic.count <- lda10.topic %>% 
+  group_by(date) %>% 
+  count(topic)
+
+lda10.topic.count %>% group_by(topic) %>%
+  summarize(total=sum(n)) %>% 
+  mutate(percent=round(100*total/346829,1))
+
+
+#ggplot(lda10.topic.count, aes(x=date, y=rollmean(n, 30, na.pad=T), color=topic)) + 
+ggplot(lda10.topic.count, aes(x=date, y=n, color=topic)) + 
+  geom_line() +
+  facet_wrap(~ topic, labeller = as_labeller(c("t_1"="Governance", 
+                                      "t_10"="Civil Rights", 
+                                      "t_2"="COVID and Education",
+                                      "t_3"="COVID and Legislation", 
+                                      "t_4"="COVID Spread", 
+                                      "t_5"="Economy, Energy, and Climate",
+                                      "t_6"="Technology and Voting", 
+                                      "t_7"="Honoring and Celebration",
+                                      "t_8"="COVID Relief",
+                                      "t_9"="COVID Resources")),
+             nrow=4, ncol=3) +
+  xlab("") +
+  ylab("Daily tweet count") +
+  ggtitle("10 Topic Model") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  theme_bw() +
+  theme(legend.position="none",
+        strip.text = element_text(size=8),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=7))
+
+
+ggplot(lda10.topic.count %>% filter(topic=="t_3"), aes(x=date, y=n, color=topic)) + 
+  geom_line() +
+  xlab("") +
+  ylab("Daily tweet count") +
+  ggtitle("10 Topic Model") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  theme_bw() +
+  theme(legend.position="none",
+        strip.text = element_text(size=8))
+```
+COMPARING MODELS
+```{r}
+model_comp <- lda3.topic.count %>% 
+  filter(topic %in% c("t_1","t_3")) %>%
+  select(-topic) %>% 
+  add_column("Model"="3-topic LDA") %>% 
+  rbind(lda5.topic.count %>% 
+    filter(topic %in% c("t_2","t_4")) %>% 
+    select(-topic) %>% 
+    add_column("Model"="5-topic LDA") 
+    ) %>% 
+  rbind(lda10.topic.count %>% 
+    filter(topic %in% c("t_2","t_3", "t_4", "t_8", "t_9")) %>% 
+    select(-topic) %>% 
+    add_column("Model"="10-topic LDA") 
+    ) %>% 
+  rbind(agg.keyword.OH %>%
+    rename("n"="tweet.count") %>% 
+    select(date, n, ) %>% 
+    add_column("Model"="Keyword") 
+    )
+
+
+model_comp %>% ggplot(aes(x=date,y=n,color=Model)) +
+  geom_line() +
+  facet_wrap(~ Model, nrow=4) +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  theme_bw() +
+  theme(legend.position="none",
+        strip.text = element_text(size=8))
+```
+
+

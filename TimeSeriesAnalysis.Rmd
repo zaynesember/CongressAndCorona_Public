@@ -1,0 +1,2145 @@
+---
+title: "Time Series Analysis"
+output: html_notebook
+---
+
+```{r setup}
+library(lmtest)
+library(tseries)
+library(forecast)
+library(vars)
+library(tsDyn)
+library(tidyverse)
+library(Hmisc)
+#library(aTSA)
+```
+
+Get weekly COVID death and tweet data ready
+```{r}
+# TWEETS AND FLAGS, WITH INFO NEEDED FOR INDIVIDUAL ANALYSIS
+pan.tweets.flagged.ind <- pan.tweets.clean %>% 
+  left_join(data.text.official.covid.all %>% dplyr::select(name, retweets, likes, campaign.account, county.icpsr, state.icpsr, district, state.abb, party.code, chamber, year.born, dwnom.dim1, dwnom.dim2, career.start, career.end, date, document_ID), by="document_ID") %>% 
+  mutate(
+    covid_flag = as.numeric(
+      str_detect(tweet.text, paste(groups_covid, collapse='|'))
+      | group_9_check(tweet.text) & !str_detect(tweet.text, paste(group_5_0, collapse='|'))
+    )) %>% 
+  mutate(flag_1 = as.numeric(str_detect(tweet.text, 
+               paste(group_1, collapse='|')))) %>% 
+  mutate(flag_2 = as.numeric(str_detect(tweet.text, 
+             paste(group_2, collapse='|')))) %>% 
+  mutate(flag_3 = as.numeric(str_detect(tweet.text, 
+             paste(group_3, collapse='|')))) %>% 
+  mutate(flag_4 = as.numeric(str_detect(tweet.text, 
+             paste(group_4, collapse='|')))) %>% 
+  mutate(flag_5 = as.numeric(str_detect(tweet.text, 
+             paste(group_5, collapse='|')))) %>% 
+  mutate(flag_5_0 = as.numeric(str_detect(tweet.text, 
+             paste(group_5_0, collapse='|')))) %>% 
+  mutate(flag_6 = as.numeric(str_detect(tweet.text, 
+             paste(group_6, collapse='|')))) %>% 
+  mutate(flag_7 = as.numeric(str_detect(tweet.text, 
+             paste(group_7, collapse='|')))) %>% 
+  mutate(flag_8 = as.numeric(str_detect(tweet.text, 
+             paste(group_8, collapse='|')))) %>% 
+  mutate(flag_9 = as.numeric(group_9_check(pan.tweets.clean$tweet.text)))
+
+
+
+# Range of dates
+dl <- seq(min(pan.tweets.flagged.ind$date), 
+    max(pan.tweets.flagged.ind$date), 
+    "1 day")
+
+# Create lookup table to index weeks
+week.index.lookup <- data.frame(date = dl, 
+                                week = sort(rep(1:(length(dl) %/% 7), 7))) 
+
+week.index.lookup <- week.index.lookup %>% 
+  mutate(week.start = sort(
+    rep(week.index.lookup$date[seq(1, length(week.index.lookup$date), 7)],
+        7)))
+
+
+weekly.covid.tweets.ind <- pan.tweets.flagged.ind %>%
+  mutate(not_covid_flag = recode(covid_flag, `0`=1, `1`=0)) %>% 
+  left_join(week.index.lookup, by="date") %>%
+  complete(week, name) %>% 
+  dplyr::select(-tweet.text, -date, -document_ID) %>% 
+  group_by(week, name) %>%
+  dplyr::summarize(#natl.week.inc.cases = sum(replace_na(natl.inc.cases,0)),
+            #natl.week.inc.deaths = sum(replace_na(natl.inc.deaths,0)),
+            covid.tweet.count=sum(replace_na(covid_flag,0)),
+            total.tweet.count=sum(replace_na(not_covid_flag,0)),
+            group1.tweet.count=sum(replace_na(flag_1,0)),
+            group2.tweet.count=sum(replace_na(flag_2,0)),
+            group3.tweet.count=sum(replace_na(flag_3,0)),
+            group4.tweet.count=sum(replace_na(flag_4,0)),
+            group5.tweet.count=sum(replace_na(flag_5,0)),
+            group5_0.tweet.count=sum(replace_na(flag_5_0,0)),
+            group6.tweet.count=sum(replace_na(flag_6,0)),
+            group7.tweet.count=sum(replace_na(flag_7,0)),
+            group8.tweet.count=sum(replace_na(flag_8,0)),
+            group9.tweet.count=sum(replace_na(flag_9,0)),
+            retweet.count=sum(replace_na(retweets,0)),
+            like.count=sum(replace_na(likes,0)),
+            week.start=week.start,
+            across()) %>% 
+  dplyr::select(-retweets, -likes, -covid_flag,
+         -not_covid_flag, -flag_1, -flag_2, 
+         -flag_3, -flag_4, -flag_5, -flag_5_0, 
+         -flag_6, -flag_7, -flag_8, -flag_9) %>% 
+  distinct()
+
+# Setting Justin Amash party to 0 if needed
+# weekly.covid.tweets.ind$party.code[weekly.covid.tweets.ind$name=="Justin Amash"] = 200
+
+# Aggregating indicators to week level
+
+missing_cds <- c(6,7,8,9,10,11,12,13,14,15)
+
+covid.NYC.w <- read.csv("Data/COVID_Indicator_Dataframes/covid_NYC.csv") %>%
+  dplyr::select(date_of_interest, CASE_COUNT, DEATH_COUNT) %>%
+  rename(cd_incremental_cases = CASE_COUNT,
+         cd_incremental_deaths = DEATH_COUNT,
+         date=date_of_interest) %>%
+  mutate(date=as.Date(date, "%m/%d/%Y")) %>%
+  filter(date >= "2020-01-19" & date <= "2020-11-28") %>% 
+  arrange(date) %>%
+  left_join(week.index.lookup, by="date") %>%
+  group_by(week) %>% 
+  summarize(cd_incremental_cases = sum(cd_incremental_cases),
+            cd_incremental_deaths = sum(cd_incremental_deaths)) %>% 
+  mutate(cd_cum_deaths = ave(cd_incremental_deaths, FUN=cumsum),
+         cd_cum_cases = ave(cd_incremental_cases, FUN=cumsum))
+
+dist_col <- sort(rep(missing_cds, nrow(covid.NYC.w)))
+
+covid.NYC.w <- bind_rows(replicate(length(missing_cds), covid.NYC.w, simplify=F)) %>%
+  mutate(state.abb="NY", district=dist_col)
+
+
+covid.CD.w <- read.csv("Data/COVID_Indicator_Dataframes/covid_cd.csv") %>% 
+  mutate(date=as.Date(date, "%Y-%m-%d")) %>% 
+  dplyr::select(-StateName, -StateCode) %>% 
+  group_by(state.abb, district) %>% arrange(date, .by_group=T) %>%
+  filter(date >= "2020-01-19" & date <= "2020-11-28") %>% 
+  left_join(week.index.lookup, by="date") %>%
+  group_by(week, district, state.abb) %>% 
+  summarize(cd_incremental_cases = sum(cd_incremental_cases),
+            cd_incremental_deaths = sum(cd_incremental_deaths)) %>% 
+  mutate(cd_cum_cases = ave(cd_incremental_cases, state.abb, district, FUN=cumsum),
+                cd_cum_deaths = ave(cd_incremental_deaths, state.abb, district, FUN=cumsum))
+
+covid.CD.w <- bind_rows(covid.CD.w, covid.NYC.w) %>% unique()
+
+
+covid.state.w <- read.csv("Data/COVID_Indicator_Dataframes/covid_state.csv") %>% 
+  mutate(date=as.Date(date, "%Y-%m-%d")) %>% 
+  group_by(state.abb) %>% arrange(date, .by_group=T) %>%
+  filter(date >= "2020-01-19" & date <= "2020-11-28") %>% 
+  left_join(week.index.lookup, by="date") %>%
+  group_by(week, state.abb) %>% 
+  summarize(state_incremental_cases = sum(state_incremental_cases),
+            state_incremental_deaths = sum(state_incremental_deaths)) %>% 
+  mutate(state_cum_cases = ave(state_incremental_cases, state.abb, FUN=cumsum),
+            state_cum_deaths = ave(state_incremental_deaths, state.abb, FUN=cumsum))
+
+
+covid.national.w <- read.csv("Data/COVID_Indicator_Dataframes/covid_national.csv") %>% 
+  mutate(date=as.Date(date, "%Y-%m-%d")) %>% 
+  filter(date >= "2020-01-19" & date <= "2020-11-28") %>% 
+  left_join(week.index.lookup, by="date") %>%
+  group_by(week) %>%
+  summarize(national_incremental_cases = sum(national_incremental_cases),
+            national_incremental_deaths = sum(national_incremental_deaths)) %>% 
+  mutate(national_cum_cases = ave(national_incremental_cases, FUN=cumsum),
+         national_cum_deaths = ave(national_incremental_deaths, FUN=cumsum))
+
+
+weekly.covid.tweets.ind <- weekly.covid.tweets.ind %>% 
+  left_join(covid.CD.w, by=c("state.abb", "district", "week")) %>% 
+  left_join(covid.state.w, by=c("state.abb", "week")) %>% 
+  left_join(covid.national.w, by="week") %>% 
+  filter(name != "Pete Visclosky") %>%  # Retired Jan 3
+  mutate(covid.tweet.share = covid.tweet.count/total.tweet.count)
+
+weekly.covid.tweets.ind <- weekly.covid.tweets.ind %>% group_by(name) %>% 
+  mutate(inc.covid.tweet.count = covid.tweet.count - lag(covid.tweet.count),
+         inc.covid.tweet.share = covid.tweet.share - lag(covid.tweet.share))
+
+weekly.covid.tweets.ind <- weekly.covid.tweets.ind %>% 
+  mutate(group5.covid.tweet.share = group5.tweet.count/covid.tweet.count,
+                                   group5.tweet.share = group5.tweet.count/total.tweet.count) %>%
+  group_by(name) %>% 
+  mutate(inc.group5.covid.tweet.share = group5.covid.tweet.share - lag(group5.covid.tweet.share),
+         inc.group5.tweet.share = group5.tweet.share - lag(group5.tweet.share),
+         inc.group5.tweet.count = group5.tweet.count - lag(group5.tweet.count))
+```
+
+Get daily COVID death and tweet data ready
+```{r}
+daily.covid.tweets <- pan.tweets.flagged.ind %>%
+  ungroup() %>% 
+  mutate(not_covid_flag = recode(covid_flag, `0`=1, `1`=0)) %>% 
+  dplyr::select(-tweet.text, -document_ID) %>% 
+  group_by(date, chamber) %>%
+  dplyr::summarize(#natl.week.inc.cases = sum(replace_na(natl.inc.cases,0)),
+            #natl.week.inc.deaths = sum(replace_na(natl.inc.deaths,0)),
+            covid.tweet.count=sum(replace_na(covid_flag,0)),
+            total.tweet.count=sum(replace_na(not_covid_flag,0)),
+            group1.tweet.count=sum(replace_na(flag_1,0)),
+            group2.tweet.count=sum(replace_na(flag_2,0)),
+            group3.tweet.count=sum(replace_na(flag_3,0)),
+            group4.tweet.count=sum(replace_na(flag_4,0)),
+            group5.tweet.count=sum(replace_na(flag_5,0)),
+            group5_0.tweet.count=sum(replace_na(flag_5_0,0)),
+            group6.tweet.count=sum(replace_na(flag_6,0)),
+            group7.tweet.count=sum(replace_na(flag_7,0)),
+            group8.tweet.count=sum(replace_na(flag_8,0)),
+            group9.tweet.count=sum(replace_na(flag_9,0)),
+            retweet.count=sum(replace_na(retweets,0)),
+            like.count=sum(replace_na(likes,0))) %>% 
+  distinct() %>% 
+  mutate(
+    covid.tweet.share = covid.tweet.count/total.tweet.count,
+    group5.tweet.all.share = group5.tweet.count/total.tweet.count,
+    group5.tweet.covid.share = group5.tweet.count/covid.tweet.count,
+    group6.tweet.all.share = group6.tweet.count/total.tweet.count,
+    group6.tweet.covid.share = group6.tweet.count/covid.tweet.count,
+  ) %>% 
+  left_join(covid.national) %>% drop_na()
+```
+
+
+Dictionary Group Time Series by Chamber
+```{r}
+# House Tweet Counts
+weekly.covid.tweets.ind %>% 
+  group_by(week) %>% 
+  filter(chamber=="House") %>% 
+  summarize(
+      #covid.tweet.count=sum(covid.tweet.count),
+      #total.tweet.count=sum(total.tweet.count),
+      group1.tweet.count=sum(group1.tweet.count),
+      group2.tweet.count=sum(group2.tweet.count),
+      group3.tweet.count=sum(group3.tweet.count),
+      group4.tweet.count=sum(group4.tweet.count),
+      group5.tweet.count=sum(group5.tweet.count),
+      #group5_0.tweet.count=sum(group5_0.tweet.count),
+      group6.tweet.count=sum(group6.tweet.count),
+      group7.tweet.count=sum(group7.tweet.count),
+      group8.tweet.count=sum(group8.tweet.count),
+      group9.tweet.count=sum(group9.tweet.count),
+      week.start=week.start) %>% distinct() %>% 
+  pivot_longer(2:10, names_to = "count.label") %>% 
+  ggplot(aes(x=week.start, y=value)) +
+    geom_point(size=1.4, alpha=0.8, shape=20, color="orangered2") +
+    geom_line(size=0.3, alpha=1, color="orangered4") +
+    scale_y_continuous(
+      name = "Weekly Tweet Count"
+    ) +
+    theme_bw() +
+    theme(axis.title.x=element_blank(),
+          axis.title.y = element_text(size = 7, margin = margin(r = 10)),
+          axis.text.y=element_text(size=8),
+          axis.text.x=element_text(size=6),
+          legend.position=c(0.55, 0.96),
+          legend.title=element_blank(),
+          legend.background=element_blank(),
+          legend.direction="horizontal") +
+    scale_x_date(date_breaks="1 month", date_labels="%b") +
+    ggtitle("House Weekly Tweet Counts by Dictionary Group") +
+    facet_wrap(~count.label, labeller = as_labeller(
+    c(
+      "group1.tweet.count"="Group 1: Direct Mentions",
+      "group2.tweet.count"="Group 2: China",
+      "group3.tweet.count"="Group 3: Behavioral Changes",
+      "group4.tweet.count"="Group 4: Official Response",
+      "group5.tweet.count"="Group 5: Epidemiological Language",
+      "group6.tweet.count"="Group 6: Economic Impacts",
+      "group7.tweet.count"="Group 7: Relief Packages",
+      "group8.tweet.count"="Group 8: National Unity",
+      "group9.tweet.count"="Group 9: Schooling and Evictions"
+    )
+  )) 
+
+# House Tweet Shares
+  
+weekly.covid.tweets.ind %>% 
+  group_by(week) %>% 
+  filter(chamber=="House") %>% 
+  summarize(
+      #covid.tweet.share=sum(covid.tweet.count),
+      #total.tweet.count=sum(total.tweet.count),
+      group1.tweet.share=sum(group1.tweet.count)/sum(covid.tweet.count),
+      group2.tweet.share=sum(group2.tweet.count)/sum(covid.tweet.count),
+      group3.tweet.share=sum(group3.tweet.count)/sum(covid.tweet.count),
+      group4.tweet.share=sum(group4.tweet.count)/sum(covid.tweet.count),
+      group5.tweet.share=sum(group5.tweet.count)/sum(covid.tweet.count),
+      #group5_0.tweet.count=sum(group5_0.tweet.count),
+      group6.tweet.share=sum(group6.tweet.count)/sum(covid.tweet.count),
+      group7.tweet.share=sum(group7.tweet.count)/sum(covid.tweet.count),
+      group8.tweet.share=sum(group8.tweet.count)/sum(covid.tweet.count),
+      group9.tweet.share=sum(group9.tweet.count)/sum(covid.tweet.count),
+      week.start=week.start) %>% distinct() %>% 
+  pivot_longer(2:10, names_to = "count.label") %>% 
+  ggplot(aes(x=week.start, y=value)) +
+    geom_point(size=1.4, alpha=0.8, shape=20, color="orangered2") +
+    geom_line(size=0.3, alpha=1, color="orangered4") +
+    scale_y_continuous(
+      name = "Weekly Share of COVID Tweets"
+    ) +
+    theme_bw() +
+    theme(axis.title.x=element_blank(),
+          axis.title.y = element_text(size = 7, margin = margin(r = 10)),
+          axis.text.y=element_text(size=8),
+          axis.text.x=element_text(size=6),
+          legend.position=c(0.55, 0.96),
+          legend.title=element_blank(),
+          legend.background=element_blank(),
+          legend.direction="horizontal") +
+    scale_x_date(date_breaks="1 month", date_labels="%b") +
+    ggtitle("House Weekly Tweet Share by Dictionary Group") +
+  facet_wrap(~count.label, labeller = as_labeller(
+    c(
+      "group1.tweet.share"="Group 1: Direct Mentions",
+      "group2.tweet.share"="Group 2: China",
+      "group3.tweet.share"="Group 3: Behavioral Changes",
+      "group4.tweet.share"="Group 4: Official Response",
+      "group5.tweet.share"="Group 5: Epidemiological Language",
+      "group6.tweet.share"="Group 6: Economic Impacts",
+      "group7.tweet.share"="Group 7: Relief Packages",
+      "group8.tweet.share"="Group 8: National Unity",
+      "group9.tweet.share"="Group 9: Schooling and Evictions"
+    )
+  ))
+
+
+# Senate Tweet Counts
+weekly.covid.tweets.ind %>% 
+  group_by(week) %>% 
+  filter(chamber=="Senate") %>% 
+  summarize(
+      #covid.tweet.count=sum(covid.tweet.count),
+      #total.tweet.count=sum(total.tweet.count),
+      group1.tweet.count=sum(group1.tweet.count),
+      group2.tweet.count=sum(group2.tweet.count),
+      group3.tweet.count=sum(group3.tweet.count),
+      group4.tweet.count=sum(group4.tweet.count),
+      group5.tweet.count=sum(group5.tweet.count),
+      #group5_0.tweet.count=sum(group5_0.tweet.count),
+      group6.tweet.count=sum(group6.tweet.count),
+      group7.tweet.count=sum(group7.tweet.count),
+      group8.tweet.count=sum(group8.tweet.count),
+      group9.tweet.count=sum(group9.tweet.count),
+      week.start=week.start) %>% distinct() %>% 
+  pivot_longer(2:10, names_to = "count.label") %>% 
+  ggplot(aes(x=week.start, y=value)) +
+    geom_point(size=1.4, alpha=0.8, shape=20, color="purple3") +
+    geom_line(size=0.3, alpha=1, color="purple4") +
+    scale_y_continuous(
+      name = "Weekly Tweet Count"
+    ) +
+    theme_bw() +
+    theme(axis.title.x=element_blank(),
+          axis.title.y = element_text(size = 7, margin = margin(r = 10)),
+          axis.text.y=element_text(size=8),
+          axis.text.x=element_text(size=6),
+          legend.position=c(0.55, 0.96),
+          legend.title=element_blank(),
+          legend.background=element_blank(),
+          legend.direction="horizontal") +
+    scale_x_date(date_breaks="1 month", date_labels="%b") +
+    ggtitle("Senate Weekly Tweet Counts by Dictionary Group") +
+    facet_wrap(~count.label, labeller = as_labeller(
+    c(
+      "group1.tweet.count"="Group 1: Direct Mentions",
+      "group2.tweet.count"="Group 2: China",
+      "group3.tweet.count"="Group 3: Behavioral Changes",
+      "group4.tweet.count"="Group 4: Official Response",
+      "group5.tweet.count"="Group 5: Epidemiological Language",
+      "group6.tweet.count"="Group 6: Economic Impacts",
+      "group7.tweet.count"="Group 7: Relief Packages",
+      "group8.tweet.count"="Group 8: National Unity",
+      "group9.tweet.count"="Group 9: Schooling and Evictions"
+    )
+  )) 
+
+# House Tweet Shares
+  
+weekly.covid.tweets.ind %>% 
+  group_by(week) %>% 
+  filter(chamber=="Senate") %>% 
+  summarize(
+      #covid.tweet.share=sum(covid.tweet.count),
+      #total.tweet.count=sum(total.tweet.count),
+      group1.tweet.share=sum(group1.tweet.count)/sum(covid.tweet.count),
+      group2.tweet.share=sum(group2.tweet.count)/sum(covid.tweet.count),
+      group3.tweet.share=sum(group3.tweet.count)/sum(covid.tweet.count),
+      group4.tweet.share=sum(group4.tweet.count)/sum(covid.tweet.count),
+      group5.tweet.share=sum(group5.tweet.count)/sum(covid.tweet.count),
+      #group5_0.tweet.count=sum(group5_0.tweet.count),
+      group6.tweet.share=sum(group6.tweet.count)/sum(covid.tweet.count),
+      group7.tweet.share=sum(group7.tweet.count)/sum(covid.tweet.count),
+      group8.tweet.share=sum(group8.tweet.count)/sum(covid.tweet.count),
+      group9.tweet.share=sum(group9.tweet.count)/sum(covid.tweet.count),
+      week.start=week.start) %>% distinct() %>%  
+  pivot_longer(2:10, names_to = "count.label") %>% 
+  ggplot(aes(x=week.start, y=value)) +
+    geom_point(size=1.4, alpha=0.8, shape=20, color="purple3") +
+    geom_line(size=0.3, alpha=1, color="purple4") +
+    scale_y_continuous(
+      name = "Weekly Share of COVID Tweets"
+    ) +
+    theme_bw() +
+    theme(axis.title.x=element_blank(),
+          axis.title.y = element_text(size = 7, margin = margin(r = 10)),
+          axis.text.y=element_text(size=8),
+          axis.text.x=element_text(size=6),
+          legend.position=c(0.55, 0.96),
+          legend.title=element_blank(),
+          legend.background=element_blank(),
+          legend.direction="horizontal") +
+    scale_x_date(date_breaks="1 month", date_labels="%b") +
+    ggtitle("Senate Weekly Tweet Share by Dictionary Group") +
+  facet_wrap(~count.label, labeller = as_labeller(
+    c(
+      "group1.tweet.share"="Group 1: Direct Mentions",
+      "group2.tweet.share"="Group 2: China",
+      "group3.tweet.share"="Group 3: Behavioral Changes",
+      "group4.tweet.share"="Group 4: Official Response",
+      "group5.tweet.share"="Group 5: Epidemiological Language",
+      "group6.tweet.share"="Group 6: Economic Impacts",
+      "group7.tweet.share"="Group 7: Relief Packages",
+      "group8.tweet.share"="Group 8: National Unity",
+      "group9.tweet.share"="Group 9: Schooling and Evictions"
+    )
+  ))
+
+```
+
+Dictionary Group Time Series by Party
+```{r}
+# Democrat Tweet Counts
+weekly.covid.tweets.ind %>% 
+  group_by(week) %>% 
+  filter(party.code==100) %>% 
+  summarize(
+      #covid.tweet.count=sum(covid.tweet.count),
+      #total.tweet.count=sum(total.tweet.count),
+      group1.tweet.count=sum(group1.tweet.count),
+      group2.tweet.count=sum(group2.tweet.count),
+      group3.tweet.count=sum(group3.tweet.count),
+      group4.tweet.count=sum(group4.tweet.count),
+      group5.tweet.count=sum(group5.tweet.count),
+      #group5_0.tweet.count=sum(group5_0.tweet.count),
+      group6.tweet.count=sum(group6.tweet.count),
+      group7.tweet.count=sum(group7.tweet.count),
+      group8.tweet.count=sum(group8.tweet.count),
+      group9.tweet.count=sum(group9.tweet.count),
+      week.start=week.start) %>% distinct() %>% 
+  pivot_longer(2:10, names_to = "count.label") %>% 
+  ggplot(aes(x=week.start, y=value)) +
+    geom_point(size=1.4, alpha=0.8, shape=20, color="blue4") +
+    geom_line(size=0.3, alpha=1, color="navyblue") +
+    scale_y_continuous(
+      name = "Weekly Tweet Count"
+    ) +
+    theme_bw() +
+    theme(axis.title.x=element_blank(),
+          axis.title.y = element_text(size = 7, margin = margin(r = 10)),
+          axis.text.y=element_text(size=8),
+          axis.text.x=element_text(size=6),
+          legend.position=c(0.55, 0.96),
+          legend.title=element_blank(),
+          legend.background=element_blank(),
+          legend.direction="horizontal") +
+    scale_x_date(date_breaks="1 month", date_labels="%b") +
+    ggtitle("Democrats Weekly Tweet Counts by Dictionary Group") +
+    facet_wrap(~count.label, labeller = as_labeller(
+    c(
+      "group1.tweet.count"="Group 1: Direct Mentions",
+      "group2.tweet.count"="Group 2: China",
+      "group3.tweet.count"="Group 3: Behavioral Changes",
+      "group4.tweet.count"="Group 4: Official Response",
+      "group5.tweet.count"="Group 5: Epidemiological Language",
+      "group6.tweet.count"="Group 6: Economic Impacts",
+      "group7.tweet.count"="Group 7: Relief Packages",
+      "group8.tweet.count"="Group 8: National Unity",
+      "group9.tweet.count"="Group 9: Schooling and Evictions"
+    )
+  )) 
+
+# Democrat Tweet Shares
+  
+weekly.covid.tweets.ind %>% 
+  group_by(week) %>% 
+  filter(party.code==100) %>% 
+  summarize(
+      covid.tweet.count=sum(covid.tweet.count),
+      #total.tweet.count=sum(total.tweet.count),
+      group1.tweet.share=sum(group1.tweet.count)/sum(covid.tweet.count),
+      group2.tweet.share=sum(group2.tweet.count)/sum(covid.tweet.count),
+      group3.tweet.share=sum(group3.tweet.count)/sum(covid.tweet.count),
+      group4.tweet.share=sum(group4.tweet.count)/sum(covid.tweet.count),
+      group5.tweet.share=sum(group5.tweet.count)/sum(covid.tweet.count),
+      #group5_0.tweet.count=sum(group5_0.tweet.count),
+      group6.tweet.share=sum(group6.tweet.count)/sum(covid.tweet.count),
+      group7.tweet.share=sum(group7.tweet.count)/sum(covid.tweet.count),
+      group8.tweet.share=sum(group8.tweet.count)/sum(covid.tweet.count),
+      group9.tweet.share=sum(group9.tweet.count)/sum(covid.tweet.count),
+      week.start=week.start) %>% distinct() %>% dplyr::select(-covid.tweet.count) %>% 
+  pivot_longer(2:10, names_to = "count.label") %>% 
+  ggplot(aes(x=week.start, y=value)) +
+    geom_point(size=1.4, alpha=0.8, shape=20, color="blue4") +
+    geom_line(size=0.3, alpha=1, color="navyblue") +
+    scale_y_continuous(
+      name = "Weekly Share of COVID Tweets"
+    ) +
+    theme_bw() +
+    theme(axis.title.x=element_blank(),
+          axis.title.y = element_text(size = 7, margin = margin(r = 10)),
+          axis.text.y=element_text(size=8),
+          axis.text.x=element_text(size=6),
+          legend.position=c(0.55, 0.96),
+          legend.title=element_blank(),
+          legend.background=element_blank(),
+          legend.direction="horizontal") +
+    scale_x_date(date_breaks="1 month", date_labels="%b") +
+    ggtitle("Democrats Weekly Tweet Share by Dictionary Group") +
+  facet_wrap(~count.label, labeller = as_labeller(
+    c(
+      "group1.tweet.share"="Group 1: Direct Mentions",
+      "group2.tweet.share"="Group 2: China",
+      "group3.tweet.share"="Group 3: Behavioral Changes",
+      "group4.tweet.share"="Group 4: Official Response",
+      "group5.tweet.share"="Group 5: Epidemiological Language",
+      "group6.tweet.share"="Group 6: Economic Impacts",
+      "group7.tweet.share"="Group 7: Relief Packages",
+      "group8.tweet.share"="Group 8: National Unity",
+      "group9.tweet.share"="Group 9: Schooling and Evictions"
+    )
+  ))
+
+
+# Republican Tweet Counts
+weekly.covid.tweets.ind %>% 
+  group_by(week) %>% 
+  filter(party.code==200) %>% 
+  summarize(
+      #covid.tweet.count=sum(covid.tweet.count),
+      #total.tweet.count=sum(total.tweet.count),
+      group1.tweet.count=sum(group1.tweet.count),
+      group2.tweet.count=sum(group2.tweet.count),
+      group3.tweet.count=sum(group3.tweet.count),
+      group4.tweet.count=sum(group4.tweet.count),
+      group5.tweet.count=sum(group5.tweet.count),
+      #group5_0.tweet.count=sum(group5_0.tweet.count),
+      group6.tweet.count=sum(group6.tweet.count),
+      group7.tweet.count=sum(group7.tweet.count),
+      group8.tweet.count=sum(group8.tweet.count),
+      group9.tweet.count=sum(group9.tweet.count),
+      week.start=week.start) %>% distinct() %>% 
+  pivot_longer(2:10, names_to = "count.label") %>% 
+  ggplot(aes(x=week.start, y=value)) +
+    geom_point(size=1.4, alpha=0.8, shape=20, color="red4") +
+    geom_line(size=0.3, alpha=1, color="darkred") +
+    scale_y_continuous(
+      name = "Weekly Tweet Count"
+    ) +
+    theme_bw() +
+    theme(axis.title.x=element_blank(),
+          axis.title.y = element_text(size = 7, margin = margin(r = 10)),
+          axis.text.y=element_text(size=8),
+          axis.text.x=element_text(size=6),
+          legend.position=c(0.55, 0.96),
+          legend.title=element_blank(),
+          legend.background=element_blank(),
+          legend.direction="horizontal") +
+    scale_x_date(date_breaks="1 month", date_labels="%b") +
+    ggtitle("Republicans Weekly Tweet Counts by Dictionary Group") +
+    facet_wrap(~count.label, labeller = as_labeller(
+    c(
+      "group1.tweet.count"="Group 1: Direct Mentions",
+      "group2.tweet.count"="Group 2: China",
+      "group3.tweet.count"="Group 3: Behavioral Changes",
+      "group4.tweet.count"="Group 4: Official Response",
+      "group5.tweet.count"="Group 5: Epidemiological Language",
+      "group6.tweet.count"="Group 6: Economic Impacts",
+      "group7.tweet.count"="Group 7: Relief Packages",
+      "group8.tweet.count"="Group 8: National Unity",
+      "group9.tweet.count"="Group 9: Schooling and Evictions"
+    )
+  )) 
+
+# Republican Tweet Shares
+  
+weekly.covid.tweets.ind %>% 
+  group_by(week) %>% 
+  filter(party.code==200) %>% 
+  summarize(
+      covid.tweet.count=sum(covid.tweet.count),
+      #total.tweet.count=sum(total.tweet.count),
+      group1.tweet.share=sum(group1.tweet.count)/sum(covid.tweet.count),
+      group2.tweet.share=sum(group2.tweet.count)/sum(covid.tweet.count),
+      group3.tweet.share=sum(group3.tweet.count)/sum(covid.tweet.count),
+      group4.tweet.share=sum(group4.tweet.count)/sum(covid.tweet.count),
+      group5.tweet.share=sum(group5.tweet.count)/sum(covid.tweet.count),
+      #group5_0.tweet.count=sum(group5_0.tweet.count),
+      group6.tweet.share=sum(group6.tweet.count)/sum(covid.tweet.count),
+      group7.tweet.share=sum(group7.tweet.count)/sum(covid.tweet.count),
+      group8.tweet.share=sum(group8.tweet.count)/sum(covid.tweet.count),
+      group9.tweet.share=sum(group9.tweet.count)/sum(covid.tweet.count),
+      week.start=week.start) %>% distinct() %>% dplyr::select(-covid.tweet.count) %>% 
+  pivot_longer(2:10, names_to = "count.label") %>% 
+  ggplot(aes(x=week.start, y=value)) +
+    geom_point(size=1.4, alpha=0.8, shape=20, color="red4") +
+    geom_line(size=0.3, alpha=1, color="darkred") +
+    scale_y_continuous(
+      name = "Weekly Share of COVID Tweets"
+    ) +
+    theme_bw() +
+    theme(axis.title.x=element_blank(),
+          axis.title.y = element_text(size = 7, margin = margin(r = 10)),
+          axis.text.y=element_text(size=8),
+          axis.text.x=element_text(size=6),
+          legend.position=c(0.55, 0.96),
+          legend.title=element_blank(),
+          legend.background=element_blank(),
+          legend.direction="horizontal") +
+    scale_x_date(date_breaks="1 month", date_labels="%b") +
+    ggtitle("Republicans Weekly Tweet Share by Dictionary Group") +
+  facet_wrap(~count.label, labeller = as_labeller(
+    c(
+      "group1.tweet.share"="Group 1: Direct Mentions",
+      "group2.tweet.share"="Group 2: China",
+      "group3.tweet.share"="Group 3: Behavioral Changes",
+      "group4.tweet.share"="Group 4: Official Response",
+      "group5.tweet.share"="Group 5: Epidemiological Language",
+      "group6.tweet.share"="Group 6: Economic Impacts",
+      "group7.tweet.share"="Group 7: Relief Packages",
+      "group8.tweet.share"="Group 8: National Unity",
+      "group9.tweet.share"="Group 9: Schooling and Evictions"
+    )
+  ))
+
+```
+
+Group 5 closer look with nat'l deaths
+```{r}
+# GROUP 5 TWEET COUNT
+coeff <- 10
+
+weekly.covid.tweets.ind %>% 
+  group_by(week) %>% 
+  summarize(
+      group5.tweet.share=sum(group5.tweet.count)/sum(covid.tweet.count),
+      group5.tweet.count=sum(group5.tweet.count),
+      week.start=week.start, week.end=week.start+6) %>% 
+  distinct() %>% drop_na(week.start) %>% 
+  pivot_longer(2:3, names_to="label") %>%
+  left_join(covid.national.w %>% dplyr::select(week, national_incremental_deaths), by=c("week")) %>% 
+  filter(label=="group5.tweet.count") %>% 
+ggplot(aes(x=week.end)) +
+  geom_point(aes(y=value), size=1.4, alpha=0.8) +
+  geom_line(aes(y=value), size=0.3, alpha=0.5) +
+  geom_point(aes(y=national_incremental_deaths/coeff), size=1.4, alpha=0.8, shape=17, color="green4") +
+  geom_line(aes(y=national_incremental_deaths/coeff), size=0.3, alpha=0.5, color="green4") +
+  #scale_color_manual(values= c("House"="darkorange4", "Senate"="magenta4")) +
+  scale_y_continuous(
+    name = "Group 5 Tweet Count",
+    sec.axis = sec_axis(~.*coeff, name="Weekly Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "green4"), 
+        axis.text.y.right = element_text(color = "green4"),
+        axis.title.y.right = element_text(color = "green4"),
+        axis.ticks.y.right = element_line(color = "green4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.position=c(0.55, 0.96),
+        legend.title=element_blank(),
+        legend.background=element_blank(),
+        legend.direction="horizontal") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Weekly Group 5 Tweet Count and National Incremental Deaths")
+
+# GROUP 5 SHARE OF COVID TWEETS
+coeff <- 20000
+
+weekly.covid.tweets.ind %>% 
+  group_by(week) %>% 
+  summarize(
+      group5.tweet.share=sum(group5.tweet.count)/sum(covid.tweet.count),
+      group5.tweet.count=sum(group5.tweet.count),
+      week.start=week.start, week.end=week.start+6) %>% 
+  distinct() %>% drop_na(week.start) %>% 
+  pivot_longer(2:3, names_to="label") %>%
+  left_join(covid.national.w %>% dplyr::select(week, national_incremental_deaths), by=c("week")) %>% 
+  filter(label=="group5.tweet.share") %>% 
+ggplot(aes(x=week.end)) +
+  geom_point(aes(y=value), size=1.4, alpha=0.8) +
+  geom_line(aes(y=value), size=0.3, alpha=0.5) +
+  geom_point(aes(y=national_incremental_deaths/coeff), size=1.4, alpha=0.8, shape=17, color="green4") +
+  geom_line(aes(y=national_incremental_deaths/coeff), size=0.3, alpha=0.5, color="green4") +
+  #scale_color_manual(values= c("House"="darkorange4", "Senate"="magenta4")) +
+  scale_y_continuous(
+    name = "Group 5 Share of COVID Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Weekly Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "green4"), 
+        axis.text.y.right = element_text(color = "green4"),
+        axis.title.y.right = element_text(color = "green4"),
+        axis.ticks.y.right = element_line(color = "green4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.position=c(0.55, 0.96),
+        legend.title=element_blank(),
+        legend.background=element_blank(),
+        legend.direction="horizontal") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Weekly Group 5 Share of COVID Tweets and National Incremental Deaths")
+
+# GROUP 5 SHARE OF ALL TWEETS
+coeff <- 20000
+
+weekly.covid.tweets.ind %>% 
+  group_by(week) %>% 
+  summarize(
+      group5.tweet.share=sum(group5.tweet.count)/sum(covid.tweet.count),
+      group5.tweet.count=sum(group5.tweet.count),
+      group5.tweet.share.all = sum(group5.tweet.count)/sum(total.tweet.count),
+      week.start=week.start, week.end=week.start+6) %>% 
+  distinct() %>% drop_na(week.start) %>% 
+  pivot_longer(2:4, names_to="label") %>%
+  left_join(covid.national.w %>% dplyr::select(week, national_incremental_deaths), by=c("week")) %>% 
+  filter(label=="group5.tweet.share.all") %>% 
+ggplot(aes(x=week.end)) +
+  geom_point(aes(y=value), size=1.4, alpha=0.8) +
+  geom_line(aes(y=value), size=0.3, alpha=0.5) +
+  geom_point(aes(y=national_incremental_deaths/coeff), size=1.4, alpha=0.8, shape=17, color="green4") +
+  geom_line(aes(y=national_incremental_deaths/coeff), size=0.3, alpha=0.5, color="green4") +
+  #scale_color_manual(values= c("House"="darkorange4", "Senate"="magenta4")) +
+  scale_y_continuous(
+    name = "Group 5 Share of All Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Weekly Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "green4"), 
+        axis.text.y.right = element_text(color = "green4"),
+        axis.title.y.right = element_text(color = "green4"),
+        axis.ticks.y.right = element_line(color = "green4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.position=c(0.55, 0.96),
+        legend.title=element_blank(),
+        legend.background=element_blank(),
+        legend.direction="horizontal") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Weekly Group 5 Share of All Tweets and National Incremental Deaths")
+
+
+# GROUP 5 COUNT BY PARTY
+coeff <- 25
+
+weekly.covid.tweets.ind %>% 
+  group_by(week, party.code) %>% 
+  summarize(
+      group5.tweet.share=sum(group5.tweet.count)/sum(covid.tweet.count),
+      group5.tweet.count=sum(group5.tweet.count),
+      week.start=week.start, week.end=week.start+6) %>% 
+  distinct() %>% drop_na(week.start) %>% filter(party.code %in% c(100,200)) %>% 
+  mutate(party=recode(party.code, `100`="Democrats", `200`="Republicans")) %>% 
+  ungroup() %>% 
+  dplyr::select(-party.code) %>% 
+  #pivot_longer(2:3, names_to="label") %>%
+  left_join(covid.national.w %>% dplyr::select(week, national_incremental_deaths), by=c("week")) %>% 
+  #filter(label=="group5.tweet.count") %>% 
+ggplot(aes(x=week.end, color=party)) +
+  geom_point(aes(y=group5.tweet.count), size=1.4, alpha=0.8) +
+  geom_line(aes(y=group5.tweet.count), size=0.3, alpha=0.5) +
+  geom_point(aes(y=national_incremental_deaths/coeff), size=1.4, alpha=0.8, shape=17, color="green4") +
+  geom_line(aes(y=national_incremental_deaths/coeff), size=0.3, alpha=0.5, color="green4") +
+  scale_color_manual(values= c("Democrats"="blue", "Republicans"="red")) +
+  scale_y_continuous(
+    name = "Group 5 Tweet Count",
+    sec.axis = sec_axis(~.*coeff, name="Weekly Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "green4"), 
+        axis.text.y.right = element_text(color = "green4"),
+        axis.title.y.right = element_text(color = "green4"),
+        axis.ticks.y.right = element_line(color = "green4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.position=c(0.55, 0.96),
+        legend.title=element_blank(),
+        legend.background=element_blank(),
+        legend.direction="horizontal") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Weekly Group 5 Tweet Count and National Incremental Deaths by Party")
+
+
+# GROUP 5 SHARE OF COVID TWEETS BY PARTY
+coeff <- 25000
+
+weekly.covid.tweets.ind %>% 
+  group_by(week, party.code) %>% 
+  summarize(
+      group5.tweet.share=sum(group5.tweet.count)/sum(covid.tweet.count),
+      group5.tweet.count=sum(group5.tweet.count),
+      week.start=week.start, week.end=week.start+6) %>% 
+  distinct() %>% drop_na(week.start) %>% filter(party.code %in% c(100,200)) %>% 
+  mutate(party=recode(party.code, `100`="Democrats", `200`="Republicans")) %>% 
+  ungroup() %>% 
+  dplyr::select(-party.code) %>% 
+  #pivot_longer(2:3, names_to="label") %>%
+  left_join(covid.national.w %>% dplyr::select(week, national_incremental_deaths), by=c("week")) %>% 
+  #filter(label=="group5.tweet.count") %>% 
+ggplot(aes(x=week.end, color=party)) +
+  geom_point(aes(y=group5.tweet.share), size=1.4, alpha=0.8) +
+  geom_line(aes(y=group5.tweet.share), size=0.3, alpha=0.5) +
+  geom_point(aes(y=national_incremental_deaths/coeff), size=1.4, alpha=0.8, shape=17, color="green4") +
+  geom_line(aes(y=national_incremental_deaths/coeff), size=0.3, alpha=0.5, color="green4") +
+  scale_color_manual(values= c("Democrats"="blue", "Republicans"="red")) +
+  scale_y_continuous(
+    name = "Group 5 Share of COVID Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Weekly Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "green4"), 
+        axis.text.y.right = element_text(color = "green4"),
+        axis.title.y.right = element_text(color = "green4"),
+        axis.ticks.y.right = element_line(color = "green4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.position=c(0.55, 0.96),
+        legend.title=element_blank(),
+        legend.background=element_blank(),
+        legend.direction="horizontal") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Weekly Group 5 Share of COVID Tweets and National Incremental Deaths by Party")
+
+
+# GROUP 5 SHARE OF ALL TWEETS BY PARTY
+coeff <- 25000
+
+weekly.covid.tweets.ind %>% 
+  group_by(week, party.code) %>% 
+  summarize(
+      group5.tweet.share=sum(group5.tweet.count)/sum(covid.tweet.count),
+      group5.tweet.count=sum(group5.tweet.count),
+      group5.tweet.share.all=sum(group5.tweet.count)/sum(total.tweet.count),
+      week.start=week.start, week.end=week.start+6) %>% 
+  distinct() %>% drop_na(week.start) %>% filter(party.code %in% c(100,200)) %>% 
+  mutate(party=recode(party.code, `100`="Democrats", `200`="Republicans")) %>% 
+  ungroup() %>% 
+  dplyr::select(-party.code) %>% 
+  #pivot_longer(2:3, names_to="label") %>%
+  left_join(covid.national.w %>% dplyr::select(week, national_incremental_deaths), by=c("week")) %>% 
+  #filter(label=="group5.tweet.count") %>% 
+ggplot(aes(x=week.end, color=party)) +
+  geom_point(aes(y=group5.tweet.share.all), size=1.4, alpha=0.8) +
+  geom_line(aes(y=group5.tweet.share.all), size=0.3, alpha=0.5) +
+  geom_point(aes(y=national_incremental_deaths/coeff), size=1.4, alpha=0.8, shape=17, color="green4") +
+  geom_line(aes(y=national_incremental_deaths/coeff), size=0.3, alpha=0.5, color="green4") +
+  scale_color_manual(values= c("Democrats"="blue", "Republicans"="red")) +
+  scale_y_continuous(
+    name = "Group 5 Share of All Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Weekly Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "green4"), 
+        axis.text.y.right = element_text(color = "green4"),
+        axis.title.y.right = element_text(color = "green4"),
+        axis.ticks.y.right = element_line(color = "green4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.position=c(0.55, 0.96),
+        legend.title=element_blank(),
+        legend.background=element_blank(),
+        legend.direction="horizontal") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Weekly Group 5 Share of All Tweets and National Incremental Deaths by Party")
+
+```
+
+
+
+Tests
+```{r}
+who <- "Nancy Pelosi"
+
+dfw <- weekly.covid.tweets.ind %>% filter(name==who, week>2) %>% arrange(week)
+
+# grangertest(x=dfw$cd_incremental_deaths, y=dfw$covid.tweet.count)[2,"Pr(>F)"]
+# 
+# lags <- 1:8
+# schiff_list <- lapply(lags, grangertest, x=dfw$cd_incremental_deaths, y=dfw$covid.tweet.count)
+# 
+# 
+# p_vals <- c()
+# for(s in schiff_list){
+#   p_vals <- c(p_vals, s[2,"Pr(>F)"])
+# }
+# 
+# ggplot(data=data.frame(p=p_vals, lag=lags), aes(x=lag, y=p)) + 
+#   geom_point() +
+#   geom_hline(yintercept=0.05, color="orange") +
+#   geom_hline(yintercept=0.005, color="red") +
+#   theme_bw()
+
+
+# ALL TWEETS ACF
+par(mfcol=c(2,1))
+# the trend signal and ACF
+plot((weekly.covid.tweets %>% filter(label=="All"))$weekly_index,
+     (weekly.covid.tweets %>% filter(label=="All"))$tweet.count,
+     type='l',col='red',
+     xlab = "Week",
+     ylab = "COVID tweet count",
+     main = "All Tweets")
+acf((weekly.covid.tweets %>% filter(label=="All"))$tweet.count,
+    lag.max = length((weekly.covid.tweets %>% filter(label=="All"))$tweet.count),
+         xlab = "lag #", ylab = 'ACF', main=' ')
+
+
+# NATIONAL DEATHS ACF
+par(mfcol=c(2,1))
+# the trend signal and ACF
+plot((weekly.covid.tweets %>% filter(label=="All"))$weekly_index,
+     (weekly.covid.tweets %>% filter(label=="All"))$natl.week.inc.deaths,
+     type='l',col='red',
+     xlab = "Week",
+     ylab = "COVID tweet count",
+     main = "National Deaths")
+acf((weekly.covid.tweets %>% filter(label=="All"))$natl.week.inc.deaths,
+    lag.max = length((weekly.covid.tweets %>% filter(label=="All"))$natl.week.inc.deaths),
+         xlab = "lag #", ylab = 'ACF', main=' ')
+
+
+# INDIVIDUAL TWEETS ACF
+par(mfcol=c(2,1))
+# the trend signal and ACF
+plot(dfw$week,dfw$covid.tweet.count,
+     type='l',col='red',
+     xlab = "Week",
+     ylab = "COVID tweet count",
+     main = who)
+acf(dfw$covid.tweet.count,lag.max = length(dfw$covid.tweet.count),
+         xlab = "lag #", ylab = 'ACF', main=' ')
+
+# INDIVIDUAL TWEETS FIRST DIFF ACF
+par(mfcol=c(2,1))
+# the trend signal and ACF
+plot(1:(length(dfw$week)-1),diff(dfw$covid.tweet.count,1),
+     type='l',col='red',
+     xlab = "Week",
+     ylab = "Incremental COVID tweet count",
+     main = paste(who, "First Diff"))
+acf(diff(dfw$covid.tweet.count,1), lag.max = length(diff(dfw$covid.tweet.count,1)),
+         xlab = "lag #", ylab = 'ACF', main=' ')
+
+
+# INDIVIDUAL DEATHS ACF
+par(mfcol=c(2,1))
+# the trend signal and ACF
+plot(dfw$week,dfw$cd_incremental_deaths,
+     type='l',col='red',
+     xlab = "Week",
+     ylab = "Incremental deaths",
+     main = paste(who, "Constituency Deaths"))
+acf(dfw$cd_incremental_deaths,lag.max = length(dfw$cd_incremental_deaths),
+         xlab = "lag #", ylab = 'ACF', main=' ')
+
+print(paste(who, "District Deaths"))
+coeftest(auto.arima(y=dfw$covid.tweet.count, xreg=dfw$cd_incremental_deaths, seasonal=F))
+
+print(paste(who, "State Deaths"))
+coeftest(auto.arima(y=dfw$covid.tweet.count, xreg=dfw$state_incremental_deaths, seasonal=F))
+
+print(paste(who, "National Deaths"))
+coeftest(auto.arima(y=dfw$covid.tweet.count, xreg=dfw$national_incremental_deaths, seasonal=F))
+```
+
+
+Granger test for aggregate House on natl inc deaths
+```{r}
+get_granger_pvals <- function(x, y, lags){
+  g_list <- lapply(lags, grangertest, x=x, y=y)
+  
+  p_vals <- c()
+  for(g in g_list){
+    p_vals <- c(p_vals, g[2,"Pr(>F)"])
+  }
+  
+  return(data.frame(p=p_vals, lag=lags))
+}
+```
+
+HOUSE AGGREGATE TWEET COUNT AND NATL DEATHS
+
+Time series plot
+```{r}
+coeff <- 3
+
+ggplot(weekly.covid.tweets %>% 
+         filter(label == "House"),
+       aes(x=enddate)) +
+  geom_point(aes(y=tweet.count), size=1.4, alpha=0.8) +
+  geom_line(aes(y=tweet.count), size=0.3, alpha=0.5) +
+  geom_point(aes(y=lag(tweet.count,1)), size=1.4, alpha=0.8, color="darkgray") +
+  geom_line(aes(y=lag(tweet.count,1)), size=0.3, alpha=0.5, color="darkgray") +
+  geom_point(aes(y=natl.week.inc.deaths/coeff), size=1.4, alpha=0.8, shape=17, color="green4") +
+  geom_line(aes(y=natl.week.inc.deaths/coeff), size=0.3, alpha=0.5, color="green4") +
+  geom_point(aes(y=lead(natl.week.inc.deaths/coeff,2)), size=1.4, alpha=0.8, shape=17, color="chartreuse4") +
+  geom_line(aes(y=lead(natl.week.inc.deaths/coeff,2)), size=0.3, alpha=0.5, color="chartreuse4") +
+  scale_y_continuous(
+    name = "Weekly Tweet Count",
+    sec.axis = sec_axis(~.*coeff, name="Weekly Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "green4"), 
+        axis.text.y.right = element_text(color = "green4"),
+        axis.title.y.right = element_text(color = "green4"),
+        axis.ticks.y.right = element_line(color = "green4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.position=c(0.55, 0.96),
+        legend.title=element_blank(),
+        legend.background=element_blank(),
+        legend.direction="horizontal") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Weekly COVID Tweets by Chamber and National Incremental Deaths")
+```
+
+STATIONARITY, LAG FIT TESTING: INC DEATHS,
+```{r}
+x0 <- (weekly.covid.tweets %>% filter(label=="House"))$natl.week.inc.deaths
+y0 <- (weekly.covid.tweets %>% filter(label=="House"))$tweet.count
+
+# Following along here: 
+# https://towardsdatascience.com/a-quick-introduction-on-granger-causality-testing-for-time-series-analysis-7113dc9420d2 
+# and here:
+# https://towardsdatascience.com/a-deep-dive-on-vector-autoregression-in-r-58767ebb3f06
+
+# ADF test for stationarity
+adf.test(x=x0) # NOT stationary (p=0.08)
+adf.test(x=y0) # stationary (p=0.05)
+
+# KPSS test for stationarity
+kpss.test(x=x0) # stationary
+kpss.test(x=y0) # stationary
+
+# PP test for unit root
+pp.test(x=x0) # Has a unit root
+pp.test(x=y0) # Has a unit root
+
+# Differencing to remove stationarity
+x0_diff <- diff(x0,1)
+y0_diff <- diff(y0,1)
+
+# ADF test again
+adf.test(x=x0_diff) # stationary (p=0.04)
+adf.test(x=y0_diff) # NOT stationary (p=0.09)
+
+# KPSS test again
+kpss.test(x=x0_diff) # stationary
+kpss.test(x=y0_diff) # stationary
+
+# PP test again
+pp.test(x=x0_diff) # no unit root
+pp.test(x=y0_diff) # no unit root
+
+# So conclude that first diff may be needed for covid deaths but results are mixed overall
+
+VARselect(y=cbind(x0,y0), lag.max=10, type="const") # Lag of 3 weeks provides best fit
+
+# Model with no diff
+var1 <- VAR(cbind(x0,y0), p=1, type="const")
+summary(var1)
+
+# Test for serial correlation of residuals
+serial.test(var1, lags.pt = 5, type="PT.asymptotic") # Indicates autocorrelation!
+
+# Test for heteroskedasticity
+arch.test(var1, lags.multi = 15, multivariate.only = T) # No ARCH effects (heterosked.)
+
+# Test for normality
+normality.test(var1, multivariate.only = T) # Not normal
+
+# Test for structural breaks
+plot(stability(var1, type = "OLS-CUSUM")) # No issues
+
+# Granger causality tests
+causality(var1, cause = "x0") # x0 does granger cause y0
+causality(var1, cause = "y0") # y0 does granger cause x0
+
+```
+
+```{r}
+# NOTE REVERSE IS SIGNIFICANT REGARDLESS OF LAG FOR SOME REASON
+ggplot(data=get_granger_pvals(
+  x=(weekly.covid.tweets %>% filter(label=="House"))$natl.week.inc.deaths,
+  y=(weekly.covid.tweets %>% filter(label=="House"))$tweet.count,
+  lags=1:10), 
+       aes(x=lag, y=p)) +
+  geom_point() +
+  geom_hline(yintercept=0.05, color="orange") +
+  geom_hline(yintercept=0.005, color="red") +
+  labs(y="p-value", x="Lag (weeks)", title="House Aggregate Tweet Count, Nat'l Inc. Deaths") +
+  theme_bw()
+```
+
+HOUSE INDIVIDUAL TWEET COUNT AND DISTRICT DEATHS
+```{r}
+who <- "Adam Schiff"
+
+dfw <- weekly.covid.tweets.ind %>% 
+  filter(name==who, 
+         !is.na(cd_incremental_cases), 
+         !is.na(cd_incremental_deaths)) %>%
+  arrange(week)
+
+coef <- 3
+
+ggplot(dfw, aes(x=week.start)) +
+  geom_point(aes(y=covid.tweet.count), size=1.4, alpha=0.8) +
+  geom_line(aes(y=covid.tweet.count), size=0.3, alpha=0.5) +
+  # geom_point(aes(y=lag(tweet.count,1)), size=1.4, alpha=0.8, color="darkgray") +
+  # geom_line(aes(y=lag(tweet.count,1)), size=0.3, alpha=0.5, color="darkgray") +
+  geom_point(aes(y=cd_incremental_deaths/coeff), size=1.4, alpha=0.8, shape=17, color="green4") +
+  geom_line(aes(y=cd_incremental_deaths/coeff), size=0.3, alpha=0.5, color="green4") +
+  # geom_point(aes(y=lead(natl.week.inc.deaths/coeff,2)), size=1.4, alpha=0.8, shape=17, color="chartreuse4") +
+  # geom_line(aes(y=lead(natl.week.inc.deaths/coeff,2)), size=0.3, alpha=0.5, color="chartreuse4") +
+  scale_y_continuous(
+    name = "Weekly Tweet Count",
+    sec.axis = sec_axis(~.*coeff, name="Weekly Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "green4"), 
+        axis.text.y.right = element_text(color = "green4"),
+        axis.title.y.right = element_text(color = "green4"),
+        axis.ticks.y.right = element_line(color = "green4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.position=c(0.55, 0.96),
+        legend.title=element_blank(),
+        legend.background=element_blank(),
+        legend.direction="horizontal") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle(paste(who, "Weekly COVID Tweets and District Incremental Deaths"))
+
+
+
+x1 <- dfw$cd_incremental_deaths
+y1 <- dfw$covid.tweet.count
+
+# Following along here: 
+# https://towardsdatascience.com/a-quick-introduction-on-granger-causality-testing-for-time-series-analysis-7113dc9420d2 
+# and here:
+# https://towardsdatascience.com/a-deep-dive-on-vector-autoregression-in-r-58767ebb3f06
+
+# ADF test for stationarity
+adf.test(x=x1) # NOT stationary
+adf.test(x=y1) # stationary
+
+# KPSS test for stationarity
+kpss.test(x=x1) # NOT stationary
+kpss.test(x=y1) # NOT stationary
+
+# PP test for unit root
+pp.test(x=x1) # Has a unit root
+pp.test(x=y1) # Has a unit root
+
+# Differencing to remove stationarity
+x1_diff <- diff(x1,1)
+y1_diff <- diff(y1,1)
+
+# ADF test again
+adf.test(x=x1_diff) # NOT stationary
+adf.test(x=y1_diff) # NOT stationary
+
+# KPSS test again
+kpss.test(x=x1_diff) # NOT stationary
+kpss.test(x=y1_diff) # NOT stationary
+
+# PP test again
+pp.test(x=x1_diff) # no unit root
+pp.test(x=y1_diff) # no unit root
+
+# Neither time series appears stationary even after differencing so maybe only run granger causality test for individual-level?
+
+VARselect(y=cbind(x1,y1), lag.max=10, type="const") # Lag of 2 weeks provides best fit
+
+# Model with no diff
+var1 <- VAR(cbind(x1,y1), p=1, type="const")
+summary(var1)
+
+# Test for serial correlation of residuals
+serial.test(var1, lags.pt = 5, type="PT.asymptotic") # Indicates autocorrelation!
+
+# Test for heteroskedasticity
+arch.test(var1, lags.multi = 15, multivariate.only = T) # No ARCH effects (heterosked.)
+
+# Test for normality
+normality.test(var1, multivariate.only = T) # Normal
+
+# Test for structural breaks
+plot(stability(var1, type = "OLS-CUSUM")) # No issues
+
+# Granger causality tests
+causality(var1, cause = "x1") # x1 doesn't cause y1
+causality(var1, cause = "y1") # y1 doesn't cause x1
+
+grangertest(x=x1, y=y1, order=2)
+```
+
+Helper functions for running stationarity and granger tests on each individual
+```{r}
+granger_tester <- function(df, x, y, lag){
+  names <- unique(df$name)
+  vals <- c()
+  for(n in names){
+
+    df_i <- df %>% filter(name==n)
+    vals <- tryCatch({
+      c(vals, grangertest(x=df_i[[x]],
+                          y=df_i[[y]],
+                          order=lag)[2,"Pr(>F)"])
+      },
+      error = function(e){c(vals, NA)})
+  }
+  
+  retVal <- data.frame(name=names, granger.p=vals)
+  
+  retVal <- retVal %>% mutate(sig.05 = case_when(
+    granger.p <= 0.05 ~ T,
+    granger.p > 0.05 ~ F,
+    is.na(granger.p) ~ NA
+  ))
+
+  return(retVal[-1,])
+}
+```
+
+```{r}
+stationarity_tester <- function(varNames, df, debug=F){
+  names <- unique(df$name)
+  
+  l <- length(names)
+  
+  df_out <- data.frame(variable=c(), adf=c(), pp=c(), kpss=c(), 
+                       pass.all = c(), pass.two = c())
+  
+  for (varName in varNames){
+    retVal <- data.frame(name=c(), adf.p=c(),
+                         pp.p=c(), kpss.p=c())
+    
+    for(n in names){
+      
+      if(debug==T){
+        print(paste("Working on:", n))
+        print(paste("    Variable:", varName))
+      }
+      
+      vals <- c(name = n, adf.p = NA, pp.p = NA, kpss.p = NA)
+  
+      
+      df_i <- df %>% filter(name==n)
+      
+      vals[["adf.p"]] <- tryCatch({adf.test(df_i[[varName]])$p.value},
+                                  error = function(e){1}) # sub high p to avoid error in table
+      
+      vals[["pp.p"]] <- tryCatch({pp.test(df_i[[varName]])[["p.value"]]},
+                                  error = function(e){1}) # sub high p to avoid error in table
+      
+      vals[["kpss.p"]] <- tryCatch({kpss.test(df_i[[varName]])[["p.value"]]},
+                                  error = function(e){0}) # sub low p to avoid error in table
+      
+      retVal <- rbind(retVal, as.data.frame(t(vals)))
+    }
+    
+    retVal <- retVal %>% mutate(adf.sig = (adf.p<=0.05),
+                                pp.sig = (pp.p<=0.05),
+                                kpss.sig = (kpss.p>=0.05)) %>% # null is stationarity
+      mutate(pass.all = (adf.sig & pp.sig & kpss.sig),
+             pass.stat = (adf.sig & pp.sig))
+
+    adf.count <- table(retVal$adf.sig)
+    adf.perc.sig <- ifelse(length(names(adf.count))==1 & names(adf.count)=="FALSE",
+                          0, round(100*(adf.count[["TRUE"]]/l)))
+    # print(varName)
+    # print(retVal$pp.sig)
+    # print(table(retVal$pp.sig))
+    
+    pp.count <- table(retVal$pp.sig)
+    pp.perc.sig <- ifelse(length(names(pp.count))==1 & names(pp.count)=="FALSE",
+                          0, round(100*(pp.count[["TRUE"]]/l)))
+    
+    kpss.count <- table(retVal$kpss.sig)
+    kpss.perc.sig <- ifelse(length(names(kpss.count))==1 & names(kpss.count)=="FALSE",
+                          0, round(100*(kpss.count[["TRUE"]]/l)))
+    
+    pass.all.count <- table(retVal$pass.all)
+    pass.all.perc <- ifelse(length(names(pass.all.count))==1 & names(pass.all.count)=="FALSE",
+                          0, round(100*(pass.all.count[["TRUE"]]/l)))
+    
+    pass.stat.count <- table(retVal$pass.stat)
+    pass.stat.perc <- ifelse(length(names(pass.stat.count))==1 & names(pass.stat.count)=="FALSE",
+                          0, round(100*(pass.stat.count[["TRUE"]]/l)))
+    
+    df_out <- rbind(df_out, 
+                    data.frame(variable=varName, adf=adf.perc.sig, 
+                               pp=pp.perc.sig, kpss=kpss.perc.sig,
+                               pass.stat.perc = pass.stat.perc,
+                               pass.all.perc = pass.all.perc))
+  }
+
+  return(df_out %>% distinct()) 
+}
+# Test case
+# stationarity_tester(varNames=c("covid.tweet.count", "covid.tweet.share"), 
+#                   df=weekly.covid.tweets.ind %>% 
+#                     filter(name %in% c("Nancy Pelosi", "Kevin McCarthy")))
+
+
+# stationarity_tester(varName=vars, 
+#                     df=weekly.covid.tweets.ind %>% filter(chamber=="House"))
+```
+
+
+TESTING STATIONARITY FOR EACH INDIVIDUAL, MEASURE
+```{r, warning=F}
+vars <- c("state_cum_deaths", "state_incremental_cases",
+          "state_cum_cases", "state_incremental_deaths",
+          "covid.tweet.count", "inc.covid.tweet.count",
+          "group5.tweet.count", "inc.group5.tweet.count",
+          "covid.tweet.share", "inc.covid.tweet.share",
+          "group5.covid.tweet.share", "inc.group5.covid.tweet.share",
+          "group5.tweet.share", "inc.group5.tweet.share")
+
+# HOUSE
+st_h <- stationarity_tester(varName=vars, 
+                    df=weekly.covid.tweets.ind %>% filter(chamber=="House"))
+
+st_s <- stationarity_tester(varName=vars, 
+                    df=weekly.covid.tweets.ind %>% filter(chamber=="Senate"))
+
+st_s %>% View()
+```
+
+TESTING STATIONARITY FOR AGGREGATE MEASURES BY CHAMBER
+```{r, warning=F}
+week.index.lookup <- week.index.lookup %>% mutate(week.end = week.start + 6)
+
+weekly.covid.tweets.ext <- weekly.covid.tweets.ind %>% 
+  group_by(chamber, week) %>% 
+  summarize(
+    covid.tweet.count = sum(covid.tweet.count),
+    covid.tweet.share = sum(covid.tweet.count)/sum(total.tweet.count),
+    group5.tweet.count = sum(group5.tweet.count),
+    group5.tweet.covid.share = sum(group5.tweet.count)/sum(covid.tweet.count),
+  ) %>%
+  left_join(week.index.lookup %>% dplyr::select(-date), by=c("week")) %>%
+  left_join(covid.national.w, by=c("week")) %>% distinct() %>% drop_na(chamber)
+
+weekly.covid.tweets.ext.h <- weekly.covid.tweets.ext %>% 
+  filter(chamber=="House") %>% 
+  mutate(inc.covid.tweet.count = c(0, diff(covid.tweet.count)),
+         inc.covid.tweet.share = c(0, diff(covid.tweet.share)),
+         inc.group5.tweet.count = c(0, diff(group5.tweet.count)),
+         inc.group5.tweet.covid.share = c(0, diff(group5.tweet.covid.share)))
+
+weekly.covid.tweets.ext.s <- weekly.covid.tweets.ext %>% 
+  filter(chamber=="Senate") %>% 
+  mutate(inc.covid.tweet.count = c(0, diff(covid.tweet.count)),
+         inc.covid.tweet.share = c(0, diff(covid.tweet.share)),
+         inc.group5.tweet.count = c(0, diff(group5.tweet.count)),
+         inc.group5.tweet.covid.share = c(0, diff(group5.tweet.covid.share)))
+
+weekly.covid.tweets.ext <- rbind(weekly.covid.tweets.ext.h, weekly.covid.tweets.ext.s)
+
+rm(weekly.covid.tweets.ext.h, weekly.covid.tweets.ext.s)
+  
+agg.vars <- c("national_cum_deaths", "national_incremental_deaths",
+              "national_cum_cases", "national_incremental_cases",
+              "covid.tweet.count", "inc.covid.tweet.count",
+              "covid.tweet.share", "inc.covid.tweet.share",
+              "group5.tweet.count", "inc.group5.tweet.count",
+              "group5.tweet.covid.share", "inc.group5.tweet.covid.share")
+
+
+lapply((weekly.covid.tweets.ext %>% filter(chamber=="House"))[agg.vars], adf.test)
+lapply((weekly.covid.tweets.ext %>% filter(chamber=="House"))[agg.vars], pp.test)
+lapply((weekly.covid.tweets.ext %>% filter(chamber=="House"))[agg.vars], kpss.test)
+
+lapply((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))[agg.vars[5:12]], adf.test)
+lapply((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))[agg.vars[5:12]], pp.test)
+lapply((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))[agg.vars[5:12]], kpss.test)
+```
+
+
+```{r}
+# TWEET COUNT, INC CD DEATHS
+hg1_c_cd <- granger_tester(
+          df = weekly.covid.tweets.ind %>% filter(chamber=="House"),
+          x="cd_incremental_cases", 
+          y="covid.tweet.count", 
+          lag=1)
+
+paste("CD % sig (lag=1):", round(100*table(hg1_c_cd$sig.05)[[2]]/(table(hg1_c_cd$sig.05)[[1]] + table(hg1_c_cd$sig.05)[[2]]),1))
+
+hg2_c_cd <- granger_tester(
+          df = weekly.covid.tweets.ind %>% filter(chamber=="House"),
+          x="cd_incremental_cases", 
+          y="covid.tweet.count", 
+          lag=2)
+
+paste("CD % sig (lag=2):", round(100*table(hg2_c_cd$sig.05)[[2]]/(table(hg2_c_cd$sig.05)[[1]] + table(hg2_c_cd$sig.05)[[2]]),1))
+
+hg3_c_cd <- granger_tester(
+          df = weekly.covid.tweets.ind %>% filter(chamber=="House"),
+          x="cd_incremental_cases", 
+          y="covid.tweet.count", 
+          lag=3)
+
+paste("CD % sig (lag=3):", round(100*table(hg3_c_cd$sig.05)[[2]]/(table(hg3_c_cd$sig.05)[[1]] + table(hg3_c_cd$sig.05)[[2]]),1))
+
+hg4_c_cd <- granger_tester(
+          df = weekly.covid.tweets.ind %>% filter(chamber=="House"),
+          x="cd_incremental_cases", 
+          y="covid.tweet.count", 
+          lag=4)
+
+paste("CD % sig (lag=4):", round(100*table(hg4_c_cd$sig.05)[[2]]/(table(hg4_c_cd$sig.05)[[1]] + table(hg4_c_cd$sig.05)[[2]]),1))
+
+
+par(mfrow = c(2, 2))
+hist(hg1_c_cd$granger.p, ylim=c(0,100))
+hist(hg2_c_cd$granger.p, ylim=c(0,100))
+hist(hg3_c_cd$granger.p, ylim=c(0,100))
+hist(hg4_c_cd$granger.p, ylim=c(0,100))
+
+
+hg1_c_state <- granger_tester(
+          df = weekly.covid.tweets.ind %>% filter(chamber=="House"),
+          x="state_incremental_cases", 
+          y="covid.tweet.count", 
+          lag=1)
+
+paste("State % sig (lag=1):", round(100*table(hg1_c_state$sig.05)[[2]]/(table(hg1_c_state$sig.05)[[1]] + table(hg1_c_state$sig.05)[[2]]),1))
+
+hg2_c_state <- granger_tester(
+          df = weekly.covid.tweets.ind %>% filter(chamber=="House"),
+          x="state_incremental_cases", 
+          y="covid.tweet.count", 
+          lag=2)
+
+paste("State % sig (lag=2):", round(100*table(hg2_c_state$sig.05)[[2]]/(table(hg2_c_state$sig.05)[[1]] + table(hg2_c_state$sig.05)[[2]]),1))
+
+hg3_c_state <- granger_tester(
+          df = weekly.covid.tweets.ind %>% filter(chamber=="House"),
+          x="state_incremental_cases", 
+          y="covid.tweet.count", 
+          lag=3)
+
+paste("State % sig (lag=3):", round(100*table(hg3_c_state$sig.05)[[2]]/(table(hg3_c_state$sig.05)[[1]] + table(hg3_c_state$sig.05)[[2]]),1))
+
+hg4_c_state <- granger_tester(
+          df = weekly.covid.tweets.ind %>% filter(chamber=="House"),
+          x="state_incremental_cases", 
+          y="covid.tweet.count", 
+          lag=4)
+
+paste("State % sig (lag=4):", round(100*table(hg4_c_state$sig.05)[[2]]/(table(hg4_c_state$sig.05)[[1]] + table(hg4_c_state$sig.05)[[2]]),1))
+
+par(mfrow = c(2, 2))
+hist(hg1_c_state$granger.p, ylim=c(0,100))
+hist(hg2_c_state$granger.p, ylim=c(0,100))
+hist(hg3_c_state$granger.p, ylim=c(0,100))
+hist(hg4_c_state$granger.p, ylim=c(0,100))
+
+
+hg1_c_natl <- granger_tester(
+          df = weekly.covid.tweets.ind %>% filter(chamber=="House"),
+          x="national_incremental_cases", 
+          y="covid.tweet.count", 
+          lag=1)
+
+paste("Natl % sig (lag=1):", round(100*table(hg1_c_natl$sig.05)[[2]]/(table(hg1_c_natl$sig.05)[[1]] + table(hg1_c_natl$sig.05)[[2]]),1))
+
+hg2_c_natl <- granger_tester(
+          df = weekly.covid.tweets.ind %>% filter(chamber=="House"),
+          x="national_incremental_cases", 
+          y="covid.tweet.count", 
+          lag=2)
+
+paste("Natl % sig (lag=2):", round(100*table(hg2_c_natl$sig.05)[[2]]/(table(hg2_c_natl$sig.05)[[1]] + table(hg2_c_natl$sig.05)[[2]]),1))
+
+hg3_c_natl <- granger_tester(
+          df = weekly.covid.tweets.ind %>% filter(chamber=="House"),
+          x="national_incremental_cases", 
+          y="covid.tweet.count", 
+          lag=3)
+
+paste("Natl % sig (lag=3):", round(100*table(hg3_c_natl$sig.05)[[2]]/(table(hg3_c_natl$sig.05)[[1]] + table(hg3_c_natl$sig.05)[[2]]),1))
+
+hg4_c_natl <- granger_tester(
+          df = weekly.covid.tweets.ind %>% filter(chamber=="House"),
+          x="national_incremental_cases", 
+          y="covid.tweet.count", 
+          lag=4)
+
+paste("Natl % sig (lag=4):", round(100*table(hg4_c_natl$sig.05)[[2]]/(table(hg4_c_natl$sig.05)[[1]] + table(hg4_c_natl$sig.05)[[2]]),1))
+
+par(mfrow = c(2, 2))
+hist(hg1_c_natl$granger.p, ylim=c(0,100))
+hist(hg2_c_natl$granger.p, ylim=c(0,100))
+hist(hg3_c_natl$granger.p, ylim=c(0,100))
+hist(hg4_c_natl$granger.p, ylim=c(0,100))
+```
+
+```{r}
+# TWEET COUNT, INC CD DEATHS
+hg1_s_cd <- granger_tester(
+          df = weekly.covid.tweets.ind %>% filter(chamber=="House"),
+          x="cd_incremental_cases", 
+          y="covid.tweet.share", 
+          lag=1)
+
+paste("CD % sig (lag=1):", round(100*table(hg1_s_cd$sig.05)[[2]]/(table(hg1_s_cd$sig.05)[[1]] + table(hg1_s_cd$sig.05)[[2]]),1))
+
+hg2_s_cd <- granger_tester(
+          df = weekly.covid.tweets.ind %>% filter(chamber=="House"),
+          x="cd_incremental_cases", 
+          y="covid.tweet.share", 
+          lag=2)
+
+paste("CD % sig (lag=2):", round(100*table(hg2_s_cd$sig.05)[[2]]/(table(hg2_s_cd$sig.05)[[1]] + table(hg2_s_cd$sig.05)[[2]]),1))
+
+hg3_s_cd <- granger_tester(
+          df = weekly.covid.tweets.ind %>% filter(chamber=="House"),
+          x="cd_incremental_cases", 
+          y="covid.tweet.share", 
+          lag=3)
+
+paste("CD % sig (lag=3):", round(100*table(hg3_s_cd$sig.05)[[2]]/(table(hg3_s_cd$sig.05)[[1]] + table(hg3_s_cd$sig.05)[[2]]),1))
+
+hg4_s_cd <- granger_tester(
+          df = weekly.covid.tweets.ind %>% filter(chamber=="House"),
+          x="cd_incremental_cases", 
+          y="covid.tweet.share", 
+          lag=4)
+
+paste("CD % sig (lag=4):", round(100*table(hg4_s_cd$sig.05)[[2]]/(table(hg4_s_cd$sig.05)[[1]] + table(hg4_s_cd$sig.05)[[2]]),1))
+
+
+par(mfrow = c(2, 2))
+hist(hg1_s_cd$granger.p, ylim=c(0,100))
+hist(hg2_s_cd$granger.p, ylim=c(0,100))
+hist(hg3_s_cd$granger.p, ylim=c(0,100))
+hist(hg4_s_cd$granger.p, ylim=c(0,100))
+
+
+hg1_s_state <- granger_tester(
+          df = weekly.covid.tweets.ind %>% filter(chamber=="House"),
+          x="state_incremental_cases", 
+          y="covid.tweet.share", 
+          lag=1)
+
+paste("State % sig (lag=1):", round(100*table(hg1_s_state$sig.05)[[2]]/(table(hg1_s_state$sig.05)[[1]] + table(hg1_s_state$sig.05)[[2]]),1))
+
+hg2_s_state <- granger_tester(
+          df = weekly.covid.tweets.ind %>% filter(chamber=="House"),
+          x="state_incremental_cases", 
+          y="covid.tweet.share", 
+          lag=2)
+
+paste("State % sig (lag=2):", round(100*table(hg2_s_state$sig.05)[[2]]/(table(hg2_s_state$sig.05)[[1]] + table(hg2_s_state$sig.05)[[2]]),1))
+
+hg3_s_state <- granger_tester(
+          df = weekly.covid.tweets.ind %>% filter(chamber=="House"),
+          x="state_incremental_cases", 
+          y="covid.tweet.share", 
+          lag=3)
+
+paste("State % sig (lag=3):", round(100*table(hg3_s_state$sig.05)[[2]]/(table(hg3_s_state$sig.05)[[1]] + table(hg3_s_state$sig.05)[[2]]),1))
+
+hg4_s_state <- granger_tester(
+          df = weekly.covid.tweets.ind %>% filter(chamber=="House"),
+          x="state_incremental_cases", 
+          y="covid.tweet.share", 
+          lag=4)
+
+paste("State % sig (lag=4):", round(100*table(hg4_s_state$sig.05)[[2]]/(table(hg4_s_state$sig.05)[[1]] + table(hg4_s_state$sig.05)[[2]]),1))
+
+par(mfrow = c(2, 2))
+hist(hg1_s_state$granger.p, ylim=c(0,100))
+hist(hg2_s_state$granger.p, ylim=c(0,100))
+hist(hg3_s_state$granger.p, ylim=c(0,100))
+hist(hg4_s_state$granger.p, ylim=c(0,100))
+
+
+hg1_s_natl <- granger_tester(
+          df = weekly.covid.tweets.ind %>% filter(chamber=="House"),
+          x="national_incremental_cases", 
+          y="covid.tweet.share", 
+          lag=1)
+
+paste("Natl % sig (lag=1):", round(100*table(hg1_s_natl$sig.05)[[2]]/(table(hg1_s_natl$sig.05)[[1]] + table(hg1_s_natl$sig.05)[[2]]),1))
+
+hg2_s_natl <- granger_tester(
+          df = weekly.covid.tweets.ind %>% filter(chamber=="House"),
+          x="national_incremental_cases", 
+          y="covid.tweet.share", 
+          lag=2)
+
+paste("Natl % sig (lag=2):", round(100*table(hg2_s_natl$sig.05)[[2]]/(table(hg2_s_natl$sig.05)[[1]] + table(hg2_s_natl$sig.05)[[2]]),1))
+
+hg3_s_natl <- granger_tester(
+          df = weekly.covid.tweets.ind %>% filter(chamber=="House"),
+          x="national_incremental_cases", 
+          y="covid.tweet.share", 
+          lag=3)
+
+paste("Natl % sig (lag=3):", round(100*table(hg3_s_natl$sig.05)[[2]]/(table(hg3_s_natl$sig.05)[[1]] + table(hg3_s_natl$sig.05)[[2]]),1))
+
+hg4_s_natl <- granger_tester(
+          df = weekly.covid.tweets.ind %>% filter(chamber=="House"),
+          x="national_incremental_cases", 
+          y="covid.tweet.share", 
+          lag=4)
+
+paste("Natl % sig (lag=4):", round(100*table(hg4_s_natl$sig.05)[[2]]/(table(hg4_s_natl$sig.05)[[1]] + table(hg4_s_natl$sig.05)[[2]]),1))
+
+par(mfrow = c(2, 2))
+hist(hg1_s_natl$granger.p, ylim=c(0,100))
+hist(hg2_s_natl$granger.p, ylim=c(0,100))
+hist(hg3_s_natl$granger.p, ylim=c(0,100))
+hist(hg4_s_natl$granger.p, ylim=c(0,100))
+```
+
+```{r}
+ggplot(data=get_granger_pvals(
+  x=(weekly.covid.tweets %>% filter(label=="House"))$natl.week.inc.cases,
+  y=(weekly.covid.tweets %>% filter(label=="House"))$tweet.count,
+  lags=1:10), 
+       aes(x=lag, y=p)) +
+  geom_point() +
+  geom_hline(yintercept=0.05, color="orange") +
+  geom_hline(yintercept=0.005, color="red") +
+  labs(y="p-value", x="Lag (weeks)", title="House Aggregate Tweet Count, Nat'l Inc. Cases") +
+  theme_bw()
+
+ggplot(data=get_granger_pvals(
+  x=(weekly.covid.tweets %>% filter(label=="House", weekly_index>0))$natl.week.inc.deaths,
+  y=diff((weekly.covid.tweets %>% filter(label=="House"))$tweet.count,1),
+  lags=1:10), 
+       aes(x=lag, y=p)) +
+  geom_point() +
+  geom_hline(yintercept=0.05, color="orange") +
+  geom_hline(yintercept=0.005, color="red") +
+  labs(y="p-value", x="Lag (weeks)", title="House Aggregate Inc Tweet Count, Nat'l Inc. Deaths") +
+  theme_bw()
+
+
+ggplot(data=get_granger_pvals(
+  x=(weekly.covid.tweets %>% filter(label=="House", weekly_index>0))$natl.week.inc.cases,
+  y=diff((weekly.covid.tweets %>% filter(label=="House"))$tweet.count,1),
+  lags=1:10), 
+       aes(x=lag, y=p)) +
+  geom_point() +
+  geom_hline(yintercept=0.05, color="orange") +
+  geom_hline(yintercept=0.005, color="red") +
+  labs(y="p-value", x="Lag (weeks)", title="House Aggregate Inc Tweet Count, Nat'l Inc. Cases") +
+  theme_bw()
+
+qqnorm(y=(weekly.covid.tweets %>% filter(label=="House"))$tweet.count)
+qqline(y=(weekly.covid.tweets %>% filter(label=="House"))$tweet.count)
+```
+
+REVISITNG STATIONARITY FOR WEEKLY AGGREGATE
+
+NATIONAL COVID INDICATORS
+```{r}
+#INCREMENTAL DEATHS
+adf.test((weekly.covid.tweets.ext %>% filter(chamber=="House"))$national_incremental_deaths)
+pp.test((weekly.covid.tweets.ext %>% filter(chamber=="House"))$national_incremental_deaths)
+
+adf.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$national_incremental_deaths)) # STATIONARY
+pp.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$national_incremental_deaths)) # STATIONARY
+
+adf.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$national_incremental_deaths, lag=2))
+pp.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$national_incremental_deaths, lag=2))
+
+#INCREMENTAL CASES
+adf.test((weekly.covid.tweets.ext %>% filter(chamber=="House"))$national_incremental_cases)
+pp.test((weekly.covid.tweets.ext %>% filter(chamber=="House"))$national_incremental_cases)
+
+adf.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$national_incremental_cases))
+pp.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$national_incremental_cases)) 
+
+adf.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$national_incremental_cases, lag=2))
+pp.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$national_incremental_cases, lag=2))
+
+
+```
+
+House
+```{r}
+#COVID TWEET COUNT
+adf.test((weekly.covid.tweets.ext %>% filter(chamber=="House"))$covid.tweet.count) # STATIONARY
+pp.test((weekly.covid.tweets.ext %>% filter(chamber=="House"))$covid.tweet.count)
+
+adf.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$covid.tweet.count)) 
+pp.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$covid.tweet.count)) # STATIONARY
+
+adf.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$covid.tweet.count, lag=2)) # STATIONARY
+pp.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$covid.tweet.count, lag=2))
+
+
+#COVID TWEET SHARE
+adf.test((weekly.covid.tweets.ext %>% filter(chamber=="House"))$covid.tweet.share)
+pp.test((weekly.covid.tweets.ext %>% filter(chamber=="House"))$covid.tweet.share)
+
+adf.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$covid.tweet.share)) # STATIONARY
+pp.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$covid.tweet.share)) # STATIONARY
+
+adf.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$covid.tweet.share, lag=2)) # STATIONARY
+pp.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$covid.tweet.share, lag=2))
+
+
+#GROUP 5 TWEET COUNT
+adf.test((weekly.covid.tweets.ext %>% filter(chamber=="House"))$group5.tweet.count)
+pp.test((weekly.covid.tweets.ext %>% filter(chamber=="House"))$group5.tweet.count)
+
+adf.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$group5.tweet.count)) 
+pp.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$group5.tweet.count)) # STATIONARY
+
+adf.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$group5.tweet.count, lag=2)) # STATIONARY
+pp.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$group5.tweet.count, lag=2))
+
+
+#GROUP 5 TWEET SHARE
+adf.test((weekly.covid.tweets.ext %>% filter(chamber=="House"))$group5.tweet.covid.share)
+pp.test((weekly.covid.tweets.ext %>% filter(chamber=="House"))$group5.tweet.covid.share) # STATIONARY
+
+adf.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$group5.tweet.covid.share)) # STATIONARY
+pp.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$group5.tweet.covid.share)) # STATIONARY
+
+adf.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$group5.tweet.covid.share, lag=2)) # STATIONARY
+pp.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$group5.tweet.covid.share, lag=2)) # STATIONARY
+```
+
+Senate
+```{r}
+#COVID TWEET COUNT
+adf.test((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$covid.tweet.count)
+pp.test((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$covid.tweet.count)
+
+adf.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$covid.tweet.count)) 
+pp.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$covid.tweet.count)) 
+
+adf.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$covid.tweet.count, lag=2)) # BORDERLINE STATIONARY
+pp.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$covid.tweet.count, lag=2)) # BORDERLINE STATIONARY
+
+
+#COVID TWEET SHARE
+adf.test((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$covid.tweet.share)
+pp.test((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$covid.tweet.share)
+
+adf.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$covid.tweet.share)) 
+pp.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$covid.tweet.share)) # STATIONARY
+
+adf.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$covid.tweet.share, lag=2)) # BORDERLINE STATIONARY
+pp.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$covid.tweet.share, lag=2))
+
+
+#GROUP 5 TWEET COUNT
+adf.test((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$group5.tweet.count)
+pp.test((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$group5.tweet.count)
+
+adf.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$group5.tweet.count)) 
+pp.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$group5.tweet.count)) # STATIONARY
+
+adf.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$group5.tweet.count, lag=2)) 
+pp.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$group5.tweet.count, lag=2)) # STATIONARY
+
+
+#GROUP 5 TWEET SHARE
+adf.test((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$group5.tweet.covid.share) # STATIONARY
+pp.test((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$group5.tweet.covid.share) # STATIONARY
+
+adf.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$group5.tweet.covid.share)) # STATIONARY
+pp.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$group5.tweet.covid.share)) # STATIONARY
+
+adf.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$group5.tweet.covid.share, lag=2)) # STATIONARY
+pp.test(diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$group5.tweet.covid.share, lag=2)) # STATIONARY
+```
+
+AGGREGATE GRANGER TEST HELPER FUNCTION
+```{r}
+granger_tester2 <- function(x_list, y_list, lag){
+  vals <- c()
+  x_names <- c()
+  y_names <- c()
+  for(i in seq_along(x_list)){
+    for(j in seq_along(y_list)){
+      vals <- tryCatch({
+        c(vals, grangertest(x=x_list[[i]],
+                            y=y_list[[j]],
+                            order=lag)[2,"Pr(>F)"])
+        },
+        error = function(e){c(vals, NA)})
+        x_names <- c(x_names, names(x_list)[[i]])
+        y_names <- c(y_names, names(y_list)[[j]])
+    }
+  }
+  
+  retVal <- data.frame(x=x_names,y=y_names, granger.p=vals)
+  
+  retVal <- retVal %>% mutate(sig.05 = case_when(
+    granger.p <= 0.05 ~ T,
+    granger.p > 0.05 ~ F,
+    is.na(granger.p) ~ NA
+  ))
+
+  return(retVal)
+}
+```
+
+
+GRANGER WEEKLY AGGREGATE TESTS
+```{r}
+print("HOUSE ORDER=1")
+granger_tester2(x_list=list(
+                  "diff_natl_inc_deaths"=diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$national_incremental_deaths)),
+                y_list=list(
+                  "diff.covid.tweet.share"=diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$covid.tweet.share),
+                  "diff.group5.tweet.covid.share"=diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$group5.tweet.covid.share),
+                  "diff2.group5.tweet.covid.share"=diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$group5.tweet.covid.share)
+                ),
+                lag=1)
+
+
+print("HOUSE ORDER=2")
+granger_tester2(x_list=list(
+                  "diff_natl_inc_deaths"=diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$national_incremental_deaths)),
+                y_list=list(
+                  "diff.covid.tweet.share"=diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$covid.tweet.share),
+                  "diff.group5.tweet.covid.share"=diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$group5.tweet.covid.share),
+                  "diff2.group5.tweet.covid.share"=diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$group5.tweet.covid.share)
+                ),
+                lag=2)
+
+print("HOUSE ORDER=3")
+granger_tester2(x_list=list(
+                  "diff_natl_inc_deaths"=diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$national_incremental_deaths)),
+                y_list=list(
+                  "diff.covid.tweet.share"=diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$covid.tweet.share),
+                  "diff.group5.tweet.covid.share"=diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$group5.tweet.covid.share),
+                  "diff2.group5.tweet.covid.share"=diff((weekly.covid.tweets.ext %>% filter(chamber=="House"))$group5.tweet.covid.share)
+                ),
+                lag=3)
+
+
+print("SENATE ORDER=1")
+granger_tester2(x_list=list(
+                  "diff_natl_inc_deaths"=diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$national_incremental_deaths)),
+                y_list=list(
+                  "group5.tweet.covid.share"=(weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$group5.tweet.covid.share,
+                  "diff.group5.tweet.covid.share"=diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$group5.tweet.covid.share),
+                  "diff2.group5.tweet.covid.share"=diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$group5.tweet.covid.share)
+                ),
+                lag=1)
+
+
+print("SENATE ORDER=2")
+granger_tester2(x_list=list(
+                  "diff_natl_inc_deaths"=diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$national_incremental_deaths)),
+                y_list=list(
+                  "diff.covid.tweet.share"=diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$covid.tweet.share),
+                  "diff.group5.tweet.covid.share"=diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$group5.tweet.covid.share),
+                  "diff2.group5.tweet.covid.share"=diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$group5.tweet.covid.share)
+                ),
+                lag=2)
+
+print("SENATE ORDER=3")
+granger_tester2(x_list=list(
+                  "diff_natl_inc_deaths"=diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$national_incremental_deaths)),
+                y_list=list(
+                  "diff.covid.tweet.share"=diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$covid.tweet.share),
+                  "diff.group5.tweet.covid.share"=diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$group5.tweet.covid.share),
+                  "diff2.group5.tweet.covid.share"=diff((weekly.covid.tweets.ext %>% filter(chamber=="Senate"))$group5.tweet.covid.share)
+                ),
+                lag=3)
+
+```
+
+
+REVISITNG STATIONARITY FOR DAILY AGGREGATE
+
+NATIONAL COVID INDICATORS
+```{r}
+#INCREMENTAL DEATHS
+adf.test((daily.covid.tweets %>% filter(chamber=="House"))$national_incremental_deaths)
+pp.test((daily.covid.tweets %>% filter(chamber=="House"))$national_incremental_deaths) # STATIONARY
+
+adf.test(diff((daily.covid.tweets %>% filter(chamber=="House"))$national_incremental_deaths)) # STATIONARY
+pp.test(diff((daily.covid.tweets %>% filter(chamber=="House"))$national_incremental_deaths)) # STATIONARY
+
+adf.test(diff((daily.covid.tweets %>% filter(chamber=="House"))$national_incremental_deaths, lag=2)) # STATIONARY
+pp.test(diff((daily.covid.tweets %>% filter(chamber=="House"))$national_incremental_deaths, lag=2)) # STATIONARY
+
+#INCREMENTAL CASES
+adf.test((daily.covid.tweets %>% filter(chamber=="House"))$national_incremental_cases)
+pp.test((daily.covid.tweets %>% filter(chamber=="House"))$national_incremental_cases)
+
+adf.test(diff((daily.covid.tweets %>% filter(chamber=="House"))$national_incremental_cases)) # STATIONARY
+pp.test(diff((daily.covid.tweets %>% filter(chamber=="House"))$national_incremental_cases)) # STATIONARY
+
+adf.test(diff((daily.covid.tweets %>% filter(chamber=="House"))$national_incremental_cases, lag=2)) # STATIONARY
+pp.test(diff((daily.covid.tweets %>% filter(chamber=="House"))$national_incremental_cases, lag=2)) # STATIONARY
+
+
+```
+
+House
+```{r}
+#COVID TWEET COUNT
+adf.test((daily.covid.tweets %>% filter(chamber=="House"))$covid.tweet.count) 
+pp.test((daily.covid.tweets %>% filter(chamber=="House"))$covid.tweet.count) # STATIONARY
+
+adf.test(diff((daily.covid.tweets %>% filter(chamber=="House"))$covid.tweet.count)) # STATIONARY
+pp.test(diff((daily.covid.tweets %>% filter(chamber=="House"))$covid.tweet.count)) # STATIONARY
+
+adf.test(diff((daily.covid.tweets %>% filter(chamber=="House"))$covid.tweet.count, lag=2)) # STATIONARY
+pp.test(diff((daily.covid.tweets %>% filter(chamber=="House"))$covid.tweet.count, lag=2)) # STATIONARY
+
+
+#COVID TWEET SHARE
+adf.test((daily.covid.tweets %>% filter(chamber=="House"))$covid.tweet.share)
+pp.test((daily.covid.tweets %>% filter(chamber=="House"))$covid.tweet.share)
+
+adf.test(diff((daily.covid.tweets %>% filter(chamber=="House"))$covid.tweet.share)) # STATIONARY 
+pp.test(diff((daily.covid.tweets %>% filter(chamber=="House"))$covid.tweet.share)) # STATIONARY 
+
+adf.test(diff((daily.covid.tweets %>% filter(chamber=="House"))$covid.tweet.share, lag=2)) # STATIONARY 
+pp.test(diff((daily.covid.tweets %>% filter(chamber=="House"))$covid.tweet.share, lag=2)) # STATIONARY
+
+
+#GROUP 5 TWEET COUNT
+adf.test((daily.covid.tweets %>% filter(chamber=="House"))$group5.tweet.count)
+pp.test((daily.covid.tweets %>% filter(chamber=="House"))$group5.tweet.count) # STATIONARY
+
+adf.test(diff((daily.covid.tweets %>% filter(chamber=="House"))$group5.tweet.count)) # STATIONARY 
+pp.test(diff((daily.covid.tweets %>% filter(chamber=="House"))$group5.tweet.count)) # STATIONARY 
+
+adf.test(diff((daily.covid.tweets %>% filter(chamber=="House"))$group5.tweet.count, lag=2)) # STATIONARY 
+pp.test(diff((daily.covid.tweets %>% filter(chamber=="House"))$group5.tweet.count, lag=2)) # STATIONARY
+
+
+#GROUP 5 TWEET SHARE
+adf.test((daily.covid.tweets %>% filter(chamber=="House"))$group5.tweet.covid.share) # STATIONARY
+pp.test((daily.covid.tweets %>% filter(chamber=="House"))$group5.tweet.covid.share)  # STATIONARY
+
+adf.test(diff((daily.covid.tweets %>% filter(chamber=="House"))$group5.tweet.covid.share))  # STATIONARY
+pp.test(diff((daily.covid.tweets %>% filter(chamber=="House"))$group5.tweet.covid.share))  # STATIONARY
+
+adf.test(diff((daily.covid.tweets %>% filter(chamber=="House"))$group5.tweet.covid.share, lag=2)) # STATIONARY 
+pp.test(diff((daily.covid.tweets %>% filter(chamber=="House"))$group5.tweet.covid.share, lag=2)) # STATIONARY 
+```
+
+Senate
+```{r}
+#COVID TWEET COUNT
+adf.test((daily.covid.tweets %>% filter(chamber=="Senate"))$covid.tweet.count)
+pp.test((daily.covid.tweets %>% filter(chamber=="Senate"))$covid.tweet.count) # STATIONARY
+
+adf.test(diff((daily.covid.tweets %>% filter(chamber=="Senate"))$covid.tweet.count))  # STATIONARY
+pp.test(diff((daily.covid.tweets %>% filter(chamber=="Senate"))$covid.tweet.count))  # STATIONARY
+
+adf.test(diff((daily.covid.tweets %>% filter(chamber=="Senate"))$covid.tweet.count, lag=2))  # STATIONARY
+pp.test(diff((daily.covid.tweets %>% filter(chamber=="Senate"))$covid.tweet.count, lag=2))  # STATIONARY
+
+
+#COVID TWEET SHARE
+adf.test((daily.covid.tweets %>% filter(chamber=="Senate"))$covid.tweet.share)
+pp.test((daily.covid.tweets %>% filter(chamber=="Senate"))$covid.tweet.share) # STATIONARY
+
+adf.test(diff((daily.covid.tweets %>% filter(chamber=="Senate"))$covid.tweet.share))  # STATIONARY
+pp.test(diff((daily.covid.tweets %>% filter(chamber=="Senate"))$covid.tweet.share))  # STATIONARY
+
+adf.test(diff((daily.covid.tweets %>% filter(chamber=="Senate"))$covid.tweet.share, lag=2))  # STATIONARY
+pp.test(diff((daily.covid.tweets %>% filter(chamber=="Senate"))$covid.tweet.share, lag=2)) # STATIONARY
+
+
+#GROUP 5 TWEET COUNT
+adf.test((daily.covid.tweets %>% filter(chamber=="Senate"))$group5.tweet.count)
+pp.test((daily.covid.tweets %>% filter(chamber=="Senate"))$group5.tweet.count)  # STATIONARY
+
+adf.test(diff((daily.covid.tweets %>% filter(chamber=="Senate"))$group5.tweet.count))  # STATIONARY
+pp.test(diff((daily.covid.tweets %>% filter(chamber=="Senate"))$group5.tweet.count))  # STATIONARY
+
+adf.test(diff((daily.covid.tweets %>% filter(chamber=="Senate"))$group5.tweet.count, lag=2))  # STATIONARY
+pp.test(diff((daily.covid.tweets %>% filter(chamber=="Senate"))$group5.tweet.count, lag=2))  # STATIONARY
+
+
+#GROUP 5 TWEET SHARE
+adf.test((daily.covid.tweets %>% filter(chamber=="Senate"))$group5.tweet.covid.share)  # STATIONARY
+pp.test((daily.covid.tweets %>% filter(chamber=="Senate"))$group5.tweet.covid.share)  # STATIONARY
+
+adf.test(diff((daily.covid.tweets %>% filter(chamber=="Senate"))$group5.tweet.covid.share))  # STATIONARY
+pp.test(diff((daily.covid.tweets %>% filter(chamber=="Senate"))$group5.tweet.covid.share))  # STATIONARY
+
+adf.test(diff((daily.covid.tweets %>% filter(chamber=="Senate"))$group5.tweet.covid.share, lag=2))  # STATIONARY
+pp.test(diff((daily.covid.tweets %>% filter(chamber=="Senate"))$group5.tweet.covid.share, lag=2)) # STATIONARY 
+```
+
+DAILY GRANGER AGGREGATE TESTS
+
+House
+```{r}
+daily_ys <- list(
+  "First difference of covid.tweet.count"=diff((daily.covid.tweets %>% filter(chamber=="House"))$covid.tweet.count),
+  "Second difference of covid.tweet.count"=diff((daily.covid.tweets %>% filter(chamber=="House"))$covid.tweet.count,lag=2),
+  "First difference of covid.tweet.share"=diff((daily.covid.tweets %>% filter(chamber=="House"))$covid.tweet.share),
+  "Second difference of covid.tweet.share"=diff((daily.covid.tweets %>% filter(chamber=="House"))$covid.tweet.share,lag=2),
+  "First difference of group5.tweet.count"=diff((daily.covid.tweets %>% filter(chamber=="House"))$group5.tweet.count),
+  "Second difference of group5.tweet.count"=diff((daily.covid.tweets %>% filter(chamber=="House"))$group5.tweet.count,lag=2),
+  "First difference of group5.tweet.covid.share"=diff((daily.covid.tweets %>% filter(chamber=="House"))$group5.tweet.covid.share),
+  "Second difference of group5.tweet.covid.share"=diff((daily.covid.tweets %>% filter(chamber=="House"))$group5.tweet.covid.share,lag=2)
+)
+
+daily_xs <- list(
+  "First difference of national incremental deaths"=diff((daily.covid.tweets %>% filter(chamber=="House"))$national_incremental_deaths),
+  "Second difference of national incremental deaths"=diff((daily.covid.tweets %>% filter(chamber=="House"))$national_incremental_deaths, lag=2),
+  "First difference of national incremental cases"=diff((daily.covid.tweets %>% filter(chamber=="House"))$national_incremental_cases),
+  "Second difference of national incremental cases"=diff((daily.covid.tweets %>% filter(chamber=="House"))$national_incremental_cases, lag=2)
+)
+
+granger_tester2(y_list=daily_xs, x_list=daily_ys, lag=5) %>% filter(sig.05==T)
+```
+
+Figuring out decompose
+```{r}
+temp <- data.frame(diff.tweet.share=diff((daily.covid.tweets %>% filter(chamber=="House"))$covid.tweet.share),
+                   diff.inc.deaths=diff((daily.covid.tweets %>% filter(chamber=="House"))$national_incremental_deaths))
+
+temp <- temp %>% mutate(index=row_number())
+temp
+
+ggplot(data=temp, aes(x=index,y=diff.tweet.share)) +
+  geom_line()
+
+ggplot(data=temp, aes(x=index,y=diff.inc.deaths)) +
+  geom_line()
+
+acf(temp$diff.tweet.share)
+
+
+temp2 <- data.frame(
+                    tweet.count=(daily.covid.tweets %>% filter(chamber=="House"))$covid.tweet.count,
+                    tweet.share=(daily.covid.tweets %>% filter(chamber=="House"))$covid.tweet.share,
+                    group5.share = (daily.covid.tweets %>% filter(chamber=="House"))$group5.tweet.covid.share,
+                    inc.deaths=(daily.covid.tweets %>% filter(chamber=="House"))$national_incremental_deaths,
+                    inc.cases=(daily.covid.tweets %>% filter(chamber=="House"))$national_incremental_cases,
+                    date=(daily.covid.tweets %>% filter(chamber=="House"))$date)
+
+# ASSUMING ADDITIVE
+plot(decompose(ts(temp2$tweet.count, frequency=7), type="additive"))
+
+plot(decompose(ts(temp2$tweet.share, frequency=7), type="additive"))
+
+plot(decompose(ts(temp2$group5.share, frequency=7), type="additive"))
+
+plot(decompose(ts(temp2$inc.deaths, frequency=7), type="additive"))
+
+plot(decompose(ts(temp2$inc.cases, frequency=7), type="additive"))
+
+
+temp3 <- data.frame(date=temp2$date,
+                    tweet.count.trend = decompose(ts(temp2$tweet.count, frequency=7), type="additive")$trend,
+                    tweet.share.trend = decompose(ts(temp2$tweet.share, frequency=7), type="additive")$trend,
+                    group5.share.trend = decompose(ts(temp2$group5.share, frequency=7), type="additive")$trend,
+                    inc.deaths.trend = decompose(ts(temp2$inc.deaths, frequency=7), type="additive")$trend,
+                    inc.cases.trend = decompose(ts(temp2$inc.cases, frequency=7), type="additive")$trend)
+
+
+ggplot(data=temp3, aes(x=date)) +
+  #geom_line(aes(y=tweet.count.trend/500), color="purple") +
+  #geom_line(aes(y=tweet.share.trend), color="navyblue") +
+  geom_line(aes(y=inc.deaths.trend/1700), color="darkorange") +
+  geom_line(aes(y=Lag(inc.deaths.trend/1700,shift=-8)), color="black", linetype="dashed") + 
+  geom_line(aes(y=inc.cases.trend/100000), color="darkred") +
+  theme_light()
+
+adf.test(na.omit(diff(temp3$tweet.count.trend)))
+```

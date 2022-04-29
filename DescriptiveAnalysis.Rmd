@@ -1,0 +1,919 @@
+---
+title: "Descriptive Analysis"
+author: "Zayne Sember"
+date: "10/26/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+library(tidyverse)
+library(grid)
+library(ggthemes)
+library(modelsummary)
+library(kableExtra)
+library(zoo)
+```
+
+# Official House Member Twitter Data
+
+## Pre-pandemic 
+
+
+## Pandemic (January 20 to November 28, 2020)
+
+Prepping the data
+```{r}
+covid.national$date <- as.Date(covid.national$date)
+
+official.house.pandemic.agg <- official.house.pandemic.tweet.count %>% 
+  group_by(date) %>% 
+  summarize(num.tweets=sum(num.tweets)) %>%
+  left_join(covid.national)
+```
+
+
+Tweet Time Series
+```{r}
+p1 <- ggplot(official.house.pandemic.agg, aes(x=date)) +
+  geom_line(aes(y=num.tweets), size=0.5, color="dodgerblue3") +
+  ylab("Tweets") +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 9,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  ggtitle("Congressional Tweet Frequency and COVID-19 Indicators (Jan-Nov 2020)")
+
+
+p2 <- ggplot(official.house.pandemic.agg, aes(x=date)) +
+  geom_line(aes(y=national_incremental_cases), size=0.5, color="sienna3") +
+  ylab("Incremental Cases") +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+      axis.title.y = element_text(size = 9,
+                                  margin = margin(r = 10)),
+      axis.text.y=element_text(size=8),
+      axis.text.x=element_blank(),
+      axis.ticks.x=element_blank())
+
+
+p3 <- ggplot(official.house.pandemic.agg, aes(x=date)) +
+  geom_line(aes(y=national_incremental_deaths), size=0.5, color="orangered4") +
+  xlab("") +
+  ylab("Incremental Deaths") +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=60,hjust=1),
+        axis.title.y = element_text(size = 9,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8)) +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+
+grid.newpage()
+grid.draw(rbind(ggplotGrob(p1), ggplotGrob(p2), ggplotGrob(p3), size="last"))
+```
+
+Prepping the Data
+```{r}
+ohpa.D <- official.house.pandemic.tweet.count %>%
+  filter(party.code==100) %>% 
+  group_by(date) %>% 
+  summarize(num.tweets=sum(num.tweets)) %>%
+  left_join(covid.national)
+
+ohpa.R <- official.house.pandemic.tweet.count %>%
+  filter(party.code==200) %>% 
+  group_by(date) %>% 
+  summarize(num.tweets=sum(num.tweets)) %>%
+  left_join(covid.national)
+```
+TOTAL TIME SERIES
+```{r}
+# p4 <- ggplot(official.house.pandemic.agg, aes(x=date)) +
+#   geom_line(aes(y=num.tweets), size=0.5, color="purple4") +
+#   ylab("Tweets") +
+#   theme_bw() +
+#   theme(axis.title.x=element_blank(),
+#         axis.title.y = element_text(size = 9,
+#                                     margin = margin(r = 10)),
+#         axis.text.y=element_text(size=8),
+#         axis.text.x=element_blank(),
+#         axis.ticks.x=element_blank()) +
+#   ggtitle("Congressional Tweet Frequency and COVID-19 Indicators (Jan-Nov 2020)")
+
+p5 <- ggplot(ohpa.D, aes(x=date)) +
+  geom_line(aes(y=num.tweets), size=0.5, color="darkblue") +
+  ylab("Democrat Tweets") +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  ggtitle("Congressional Tweet Frequency by Party and COVID-19 Indicators (Jan-Nov 2020)")
+
+p6 <- ggplot(ohpa.R, aes(x=date)) +
+  geom_line(aes(y=num.tweets), size=0.5, color="darkred") +
+  ylab("Republican Tweets") +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+
+p7 <- ggplot(official.house.pandemic.agg, aes(x=date)) +
+  geom_line(aes(y=national_incremental_cases), size=0.5, color="sienna3") +
+  ylab("Incremental Cases") +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+      axis.title.y = element_text(size = 7,
+                                  margin = margin(r = 10)),
+      axis.text.y=element_text(size=8),
+      axis.text.x=element_blank(),
+      axis.ticks.x=element_blank())
+
+
+p8 <- ggplot(official.house.pandemic.agg, aes(x=date)) +
+  geom_line(aes(y=national_incremental_deaths), size=0.5, color="black") +
+  xlab("") +
+  ylab("Incremental Deaths") +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=60,hjust=1),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8)) +
+  scale_x_date(date_breaks="1 month", date_labels="%b")
+
+grid.newpage()
+grid.draw(rbind(ggplotGrob(p5), ggplotGrob(p6),
+                ggplotGrob(p7), ggplotGrob(p8),size="last"))
+```
+PREPPING THE DATA
+```{r}
+ohpa.total <- official.house.pandemic.tweet.count[,1:14] %>% 
+  group_by(name) %>% 
+  mutate(total.tweets=sum(num.tweets)) %>%
+  select(-date,-num.tweets) %>% 
+  distinct()
+```
+
+TOTAL TWEET DISTRIBUTIONS
+```{r}
+# RAW DISTRIBUTION
+q.T <- ggplot(ohpa.total, aes(x=total.tweets)) +
+  geom_histogram(fill="purple4", color="gray15", bins=50) +
+  theme_bw() +
+  scale_x_continuous(labels = scales::comma) +
+  ylim(c(0,50)) +
+  xlab("") +
+  ylab("") +
+  ggtitle("Distribution of Total Tweets for 116th House (Jan-Nov 2020)") +
+  theme(plot.title = element_text(size=10))
+
+q.D <- ggplot(ohpa.total %>% filter(party.code==100), aes(x=total.tweets)) +
+  geom_histogram(fill="blue4", color="gray15", bins=50) +
+  theme_bw() +
+  scale_x_continuous(labels = scales::comma) +
+  ylim(c(0,30)) +
+  xlab("") +
+  ylab("") +
+  ggtitle("Democrats") +
+  theme(plot.title = element_text(size=10))
+
+q.R <- ggplot(ohpa.total %>% filter(party.code==200), aes(x=total.tweets)) +
+  geom_histogram(fill="red4", color="gray15", bins=50) +
+  theme_bw() +
+  scale_x_continuous(labels = scales::comma,
+                     limits=c(0,2500)) +
+  ylim(c(0,30)) +
+  xlab("") +
+  ylab("") +
+  xlab("Total Tweets") +
+  ggtitle("Republicans") +
+  theme(plot.title = element_text(size=10))
+
+grid.newpage()
+grid.draw(rbind(ggplotGrob(q.T), ggplotGrob(q.D),
+                ggplotGrob(q.R), size="last"))
+
+# LOGGED DISTRIBUTION
+q.lT <- ggplot(ohpa.total, aes(x=log(total.tweets))) +
+  geom_histogram(fill="purple4", color="gray15", bins=50) +
+  theme_bw() +
+  scale_x_continuous(labels = scales::comma,
+                     limits=c(0,10)) +
+  xlab("") +
+  ylab("") +
+  ggtitle("Distribution of Logged Total Tweets by 116th House (Jan-Nov 2020)") +
+  theme(plot.title = element_text(size=10))
+
+q.lD <- ggplot(ohpa.total %>% filter(party.code==100), aes(x=log(total.tweets))) +
+  geom_histogram(fill="blue4", color="gray15", bins=50) +
+  theme_bw() +
+  scale_x_continuous(labels = scales::comma,
+                     limits=c(0,10)) +
+  ylim(c(0,35)) +
+  xlab("") +
+  ylab("") +
+  ggtitle("Democrats") +
+  theme(plot.title = element_text(size=10))
+
+q.lR <- ggplot(ohpa.total %>% filter(party.code==200), aes(x=log(total.tweets))) +
+  geom_histogram(fill="red4", color="gray15", bins=50) +
+  theme_bw() +
+  scale_x_continuous(labels = scales::comma,
+                     limits=c(0,10)) +
+  ylim(c(0,35)) +
+  ylab("") +
+  xlab("Logged Total Tweets") +
+  ggtitle("Republicans") +
+  theme(plot.title = element_text(size=10))
+
+grid.newpage()
+grid.draw(rbind(ggplotGrob(q.lT), ggplotGrob(q.lD),
+                ggplotGrob(q.lR), size="last"))
+
+ohpa.total %>% arrange(desc(total.tweets)) %>% select(name, state.abb, district, party.code, total.tweets)
+```
+Party and Age
+```{r}
+#recode party code to be a dummy
+ohpa.total <- ohpa.total %>% filter(party.code!=328) %>% mutate(party = recode(party.code, `100`=1, `200`=0))
+
+ggplot(ohpa.total, aes(x=year.born, y=total.tweets)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+  ggtitle("Tweet Frequency and Age for the 116th House (Jan-Mar 2020)") +
+  theme_bw()
+
+ggplot(ohpa.total, aes(x=year.born, y=log(total.tweets))) +
+  geom_point() +
+  geom_smooth(method="lm") +
+  ggtitle("Tweet Frequency and Age for the 116th House (Jan-Mar 2020)") +
+  theme_bw()
+
+# UNLOGGED REGRESSIONS
+# Testing party and age
+tweets_on_years <- lm(total.tweets ~ year.born, data=ohpa.total)
+tweets_on_years_res <-resid(tweets_on_years)
+ggplot(ohpa.total, aes(x=total.tweets,y=tweets_on_years_res)) +
+  geom_point()
+tweets_on_party <- lm(total.tweets ~ party, data=ohpa.total)
+tweets_on_years_party <- lm(total.tweets ~ year.born + party, data=ohpa.total)
+tweets_on_years_party_int <- lm(total.tweets ~ year.born*party, data=ohpa.total)
+summary(tweets_on_years_party_int)
+
+ms1 <- modelsummary(list(tweets_on_years, tweets_on_party, tweets_on_years_party, tweets_on_years_party_int), 
+             stars=T,
+             output="kableExtra")
+
+save_kable(ms1, "Tables/tweets_on_age_party.png")
+
+# Testing party and dwnom dim1
+tweets_on_dim1 <- lm(total.tweets ~ dwnom.dim1, data=ohpa.total)
+tweets_on_years_dim1 <- lm(total.tweets ~ year.born + dwnom.dim1, data=ohpa.total)
+tweets_on_years_dim1_int <- lm(total.tweets ~ year.born*dwnom.dim1, data=ohpa.total)
+summary(tweets_on_years_dim1_int)
+
+ms2 <- modelsummary(list(tweets_on_years, tweets_on_dim1, tweets_on_years_dim1, tweets_on_years_dim1_int), 
+             stars=T,
+             output="kableExtra")
+
+save_kable(ms2, "Tables/tweets_on_age_dim1.png")
+
+
+# To log or not to log
+qqnorm(resid(lm(log(total.tweets)~year.born, data=ohpa.total)))
+qqline(resid(lm(log(total.tweets)~year.born, data=ohpa.total)))
+qqnorm(tweets_on_years_res)
+qqline(tweets_on_years_res)
+
+```
+```{r}
+log_tweets_on_years <- lm(log(total.tweets) ~ year.born, data=ohpa.total)
+log_tweets_on_party <- lm(log(total.tweets) ~ party, data=ohpa.total)
+log_tweets_on_years_party <- lm(log(total.tweets) ~ year.born + party, data=ohpa.total)
+log_tweets_on_years_party_int <- lm(log(total.tweets) ~ year.born*party, data=ohpa.total)
+
+ms3 <- modelsummary(list(log_tweets_on_years, log_tweets_on_party, 
+                         log_tweets_on_years_party,log_tweets_on_years_party_int), 
+             stars=T,
+             output="kableExtra")
+
+save_kable(ms3, "Tables/log_tweets_on_age_party.png")
+
+# Testing party and dwnom dim1
+log_tweets_on_dim1 <- lm(log(total.tweets) ~ dwnom.dim1, data=ohpa.total)
+log_tweets_on_years_dim1 <- lm(log(total.tweets) ~ year.born + dwnom.dim1, data=ohpa.total)
+log_tweets_on_years_dim1_int <- lm(log(total.tweets) ~ year.born*dwnom.dim1, data=ohpa.total)
+
+
+ms4 <- modelsummary(list(log_tweets_on_years, log_tweets_on_dim1,
+                         log_tweets_on_years_dim1, log_tweets_on_years_dim1_int), 
+             stars=T,
+             output="kableExtra")
+
+save_kable(ms4, "Tables/log_tweets_on_age_dim1.png")
+```
+
+
+## Prepandemic
+Prepping the Data
+```{r}
+ohppa.D <- official.house.prepandemic.tweet.count %>%
+  filter(party.code==100) %>% 
+  group_by(date) %>% 
+  summarize(num.tweets=sum(num.tweets)) %>%
+  left_join(covid.national)
+
+ohppa.R <- official.house.prepandemic.tweet.count %>%
+  filter(party.code==200) %>% 
+  group_by(date) %>% 
+  summarize(num.tweets=sum(num.tweets)) %>%
+  left_join(covid.national)
+
+ohppa.total <- official.house.prepandemic.tweet.count[,1:14] %>% 
+  group_by(name) %>% 
+  mutate(total.tweets=sum(num.tweets)) %>%
+  select(-date,-num.tweets) %>% 
+  distinct()
+```
+TOTAL TIME SERIES
+```{r}
+r1 <- ggplot(official.house.prepandemic.agg, aes(x=date)) +
+  geom_line(aes(y=num.tweets), size=0.5, color="purple4") +
+  ylab("Tweets") +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 9,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  ggtitle("Congressional Tweet Prepandemic Frequency (Jan 2019-Jan 2020)")
+
+r2 <- ggplot(ohppa.D, aes(x=date)) +
+  geom_line(aes(y=num.tweets), size=0.5, color="darkblue") +
+  ylab("Democrat Tweets") +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+
+r3 <- ggplot(ohppa.R, aes(x=date)) +
+  geom_line(aes(y=num.tweets), size=0.5, color="darkred") +
+  ylab("Republican Tweets") +
+  xlab("") +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        axis.text.x=element_text(angle=60,hjust=1)) +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+
+grid.newpage()
+grid.draw(rbind(ggplotGrob(r1), ggplotGrob(r2),
+                ggplotGrob(r3), size="last"))
+```
+
+TOTAL TWEET DISTRIBUTIONS
+```{r}
+# RAW DISTRIBUTION
+t.T <- ggplot(ohppa.total, aes(x=total.tweets)) +
+  geom_histogram(fill="purple4", color="gray15", bins=50) +
+  theme_bw() +
+  scale_x_continuous(labels = scales::comma,
+                     limits=c(0,2000)) +
+  ylim(c(0,50)) +
+  xlab("") +
+  ylab("") +
+  ggtitle("Distribution of Total Tweets for 116th House (Jan 2019-Jan 2020)") +
+  theme(plot.title = element_text(size=10))
+
+t.D <- ggplot(ohppa.total %>% filter(party.code==100), aes(x=total.tweets)) +
+  geom_histogram(fill="blue4", color="gray15", bins=50) +
+  theme_bw() +
+  scale_x_continuous(labels = scales::comma,
+                     limits=c(0,2000)) +
+  ylim(c(0,30)) +
+  xlab("") +
+  ylab("") +
+  ggtitle("Democrats") +
+  theme(plot.title = element_text(size=10))
+
+t.R <- ggplot(ohppa.total %>% filter(party.code==200), aes(x=total.tweets)) +
+  geom_histogram(fill="red4", color="gray15", bins=50) +
+  theme_bw() +
+  scale_x_continuous(labels = scales::comma,
+                     limits=c(0,2000)) +
+  ylim(c(0,30)) +
+  xlab("") +
+  ylab("") +
+  xlab("Total Tweets") +
+  ggtitle("Republicans") +
+  theme(plot.title = element_text(size=10))
+
+grid.newpage()
+grid.draw(rbind(ggplotGrob(t.T), ggplotGrob(t.D),
+                ggplotGrob(t.R), size="last"))
+
+# LOGGED DISTRIBUTION
+t.lT <- ggplot(ohppa.total, aes(x=log(total.tweets))) +
+  geom_histogram(fill="purple4", color="gray15", bins=50) +
+  theme_bw() +
+  scale_x_continuous(labels = scales::comma,
+                     limits=c(0,10)) +
+  xlab("") +
+  ylab("") +
+  ggtitle("Distribution of Logged Total Tweets by 116th House (Jan 2019-Jan 2020)") +
+  theme(plot.title = element_text(size=10))
+
+t.lD <- ggplot(ohppa.total %>% filter(party.code==100), aes(x=log(total.tweets))) +
+  geom_histogram(fill="blue4", color="gray15", bins=50) +
+  theme_bw() +
+  scale_x_continuous(labels = scales::comma,
+                     limits=c(0,10)) +
+  ylim(c(0,30)) +
+  xlab("") +
+  ylab("") +
+  ggtitle("Democrats") +
+  theme(plot.title = element_text(size=10))
+
+t.lR <- ggplot(ohppa.total %>% filter(party.code==200), aes(x=log(total.tweets))) +
+  geom_histogram(fill="red4", color="gray15", bins=50) +
+  theme_bw() +
+  scale_x_continuous(labels = scales::comma,
+                     limits=c(0,10)) +
+  ylim(c(0,30)) +
+  ylab("") +
+  xlab("Logged Total Tweets") +
+  ggtitle("Republicans") +
+  theme(plot.title = element_text(size=10))
+
+grid.newpage()
+grid.draw(rbind(ggplotGrob(t.lT), ggplotGrob(t.lD),
+                ggplotGrob(t.lR), size="last"))
+
+ohppa.total %>% arrange(desc(total.tweets)) %>% select(name, state.abb, district, party.code, total.tweets)
+```
+RESTRICT TO JAN-NOV 2019
+```{r}
+ohppa.D.jn <- official.house.prepandemic.tweet.count %>%
+  filter(party.code==100 & date <= as.Date("2019-11-28")) %>% 
+  group_by(date) %>% 
+  summarize(num.tweets=sum(num.tweets)) %>%
+  left_join(covid.national)
+
+ohppa.R.jn <- official.house.prepandemic.tweet.count %>%
+  filter(party.code==200 & date <= as.Date("2019-11-28")) %>% 
+  group_by(date) %>% 
+  summarize(num.tweets=sum(num.tweets)) %>%
+  left_join(covid.national)
+
+ohppa.total.jn <- official.house.prepandemic.tweet.count[,1:14] %>%
+  filter(date <= as.Date("2019-11-28")) %>%
+  group_by(name) %>% 
+  mutate(total.tweets=sum(num.tweets)) %>%
+  select(-date,-num.tweets) %>% 
+  distinct()
+```
+
+```{r}
+# RAW DISTRIBUTION
+t.T.jn <- ggplot(ohppa.total.jn, aes(x=total.tweets)) +
+  geom_histogram(fill="purple4", color="gray15", bins=50) +
+  theme_bw() +
+  scale_x_continuous(labels = scales::comma,
+                     limits=c(0,2500)) +
+  ylim(c(0,50)) +
+  xlab("") +
+  ylab("") +
+  ggtitle("Distribution of Total Tweets for 116th House (Jan 2019-Jan 2020)") +
+  theme(plot.title = element_text(size=10))
+
+t.D.jn <- ggplot(ohppa.total.jn %>% filter(party.code==100), aes(x=total.tweets)) +
+  geom_histogram(fill="blue4", color="gray15", bins=50) +
+  theme_bw() +
+  scale_x_continuous(labels = scales::comma,
+                     limits=c(0,2500)) +
+  ylim(c(0,30)) +
+  xlab("") +
+  ylab("") +
+  ggtitle("Democrats") +
+  theme(plot.title = element_text(size=10))
+
+t.R.jn <- ggplot(ohppa.total.jn %>% filter(party.code==200), aes(x=total.tweets)) +
+  geom_histogram(fill="red4", color="gray15", bins=50) +
+  theme_bw() +
+  scale_x_continuous(labels = scales::comma,
+                     limits=c(0,2500)) +
+  ylim(c(0,30)) +
+  xlab("") +
+  ylab("") +
+  xlab("Total Tweets") +
+  ggtitle("Republicans") +
+  theme(plot.title = element_text(size=10))
+
+grid.newpage()
+grid.draw(rbind(ggplotGrob(t.T.jn), ggplotGrob(t.D.jn),
+                ggplotGrob(t.R.jn), size="last"))
+
+# LOGGED DISTRIBUTION
+t.lT.jn <- ggplot(ohppa.total.jn, aes(x=log(total.tweets))) +
+  geom_histogram(fill="purple4", color="gray15", bins=50) +
+  theme_bw() +
+  scale_x_continuous(labels = scales::comma,
+                     limits=c(0,10)) +
+  xlab("") +
+  ylab("") +
+  ggtitle("Distribution of Logged Total Tweets by 116th House (Jan 2019-Jan 2020)") +
+  theme(plot.title = element_text(size=10))
+
+t.lD.jn <- ggplot(ohppa.total.jn %>% filter(party.code==100), aes(x=log(total.tweets))) +
+  geom_histogram(fill="blue4", color="gray15", bins=50) +
+  theme_bw() +
+  scale_x_continuous(labels = scales::comma,
+                     limits=c(0,10)) +
+  ylim(c(0,40)) +
+  xlab("") +
+  ylab("") +
+  ggtitle("Democrats") +
+  theme(plot.title = element_text(size=10))
+
+t.lR.jn <- ggplot(ohppa.total.jn %>% filter(party.code==200), aes(x=log(total.tweets))) +
+  geom_histogram(fill="red4", color="gray15", bins=50) +
+  theme_bw() +
+  scale_x_continuous(labels = scales::comma,
+                     limits=c(0,10)) +
+  ylim(c(0,40)) +
+  ylab("") +
+  xlab("Logged Total Tweets") +
+  ggtitle("Republicans") +
+  theme(plot.title = element_text(size=10))
+
+grid.newpage()
+grid.draw(rbind(ggplotGrob(t.lT.jn), ggplotGrob(t.lD.jn),
+                ggplotGrob(t.lR.jn), size="last"))
+
+ohppa.total.jn %>% arrange(desc(total.tweets)) %>% select(name, state.abb, district, party.code, total.tweets)
+```
+COMPARING PREPANDEMIC AND PANDEMIC TWEET DATA
+
+PREP THE DATA
+```{r}
+official.house.prepost <- bind_rows(official.house.prepandemic.tweet.count, 
+                                    official.house.pandemic.tweet.count[,1:16])
+
+official.house.prepost$date <- as.Date(official.house.prepost$date)
+
+ohpall.D <- official.house.prepost %>%
+  filter(party.code==100) %>% 
+  group_by(date) %>% 
+  summarize(num.tweets=sum(num.tweets)) %>%
+  left_join(covid.national)
+
+ohpall.R <- official.house.prepost %>%
+  filter(party.code==200) %>% 
+  group_by(date) %>% 
+  summarize(num.tweets=sum(num.tweets)) %>%
+  left_join(covid.national)
+
+ohpall.total <- official.house.prepost %>% 
+  group_by(date) %>% 
+  summarize(num.tweets=sum(num.tweets)) %>%
+  left_join(covid.national)
+```
+
+UNIFIED TIME SERIES
+```{r}
+s1 <- ggplot(ohpall.total, aes(x=date)) +
+  geom_line(aes(y=num.tweets), size=0.5, color="purple4") +
+  geom_vline(xintercept=as.Date("2020-01-20"), 
+             linetype="dashed", 
+             color="orangered2") +
+  ylab("Tweets") +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 9,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  ggtitle("116th House Tweet Frequency (Jan 2019-Nov 2020)")
+
+
+s2 <- ggplot(ohpall.D, aes(x=date)) +
+  geom_line(aes(y=num.tweets), size=0.5, color="darkblue") +
+  geom_vline(xintercept=as.Date("2020-01-20"), 
+             linetype="dashed", 
+             color="orangered2") +
+  ylab("Democrat Tweets") +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+
+s3 <- ggplot(ohpall.R, aes(x=date)) +
+  geom_line(aes(y=num.tweets), size=0.5, color="darkred") +
+  geom_vline(xintercept=as.Date("2020-01-20"), 
+             linetype="dashed", 
+             color="orangered2") +
+  ylab("Republican Tweets") +
+  xlab("") +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        axis.text.x=element_text(angle=60,hjust=1)) +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+grid.newpage()
+grid.draw(rbind(ggplotGrob(s1), ggplotGrob(s2),
+                ggplotGrob(s3), size="last"))
+```
+What if I apply a rolling average?
+```{r}
+s4 <- ggplot(ohpall.total, aes(x=date)) +
+  geom_line(aes(y=rollmean(num.tweets,7, na.pad=T)), size=0.5, color="purple4") +
+  geom_vline(xintercept=as.Date("2020-01-20"), 
+             linetype="dashed", 
+             color="orangered2") +
+  ylab("Tweets") +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 9,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  ggtitle("116th House 7 Day Rolling Average Tweet Frequency (Jan 2019-Nov 2020)")
+
+
+s5 <- ggplot(ohpall.D, aes(x=date)) +
+  geom_line(aes(y=rollmean(num.tweets,7, na.pad=T)), size=0.5, color="darkblue") +
+  geom_vline(xintercept=as.Date("2020-01-20"), 
+             linetype="dashed", 
+             color="orangered2") +
+  ylab("Democrat Tweets") +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  ylim(c(0,800))
+
+s6 <- ggplot(ohpall.R, aes(x=date)) +
+  geom_line(aes(y=rollmean(num.tweets,7, na.pad=T)), size=0.5, color="darkred") +
+  geom_vline(xintercept=as.Date("2020-01-20"), 
+             linetype="dashed", 
+             color="orangered2") +
+  ylab("Republican Tweets") +
+  xlab("") +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        axis.text.x=element_text(angle=60,hjust=1)) +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ylim(c(0,800))
+
+grid.newpage()
+grid.draw(rbind(ggplotGrob(s4), ggplotGrob(s5),
+                ggplotGrob(s6), size="last"))
+```
+Comparing Prepandemic to Pandemic
+```{r}
+prepost.compare <- official.house.prepost %>%
+  mutate(pandemic = case_when(
+    date >= as.Date("2019-01-20") & date <= as.Date("2019-11-28") ~ 0,
+    date >= as.Date("2020-01-20") & date <= as.Date("2020-11-28") ~ 1
+  )) %>% 
+  group_by(name, pandemic) %>% 
+  summarize(num.tweets=sum(num.tweets),
+            pandemic=pandemic,
+            party.code=party.code,
+            year.born=year.born,
+            dwnom.dim1=dwnom.dim1,
+            dwnom.dim2=dwnom.dim2,
+            career.start=career.start,
+            chamber=chamber) %>%
+  drop_na %>% 
+  distinct()
+```
+
+Comparing Distributions
+```{r}
+ggplot(prepost.compare, aes(x=num.tweets, fill=as.factor(pandemic))) +
+  geom_density(alpha=0.65) +
+  scale_fill_manual(values=c("darkgreen","darkorange"), name="", labels=c("Prepandemic (Jan-Nov 2019)", "Pandemic (Jan-Nov 2020)")) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+  panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  xlab("Total Member Tweets") +
+  ylab("Density") +
+  ggtitle("116th House Tweet Frequency Distribution") +
+  xlim(c(0,2500))
+
+ggplot(prepost.compare %>% filter(party.code==100), aes(x=num.tweets, fill=as.factor(pandemic))) +
+  geom_density(alpha=0.65) +
+  scale_fill_manual(values=c("blue","cyan"), name="", labels=c("Prepandemic (Jan-Nov 2019)", "Pandemic (Jan-Nov 2020)")) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+  panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  xlab("Total Member Tweets") +
+  ylab("Density") +
+  ggtitle("116th House Democrat Tweet Frequency Distribution") +
+  xlim(c(0,2500))
+
+ggplot(prepost.compare %>% filter(party.code==200), aes(x=num.tweets, fill=as.factor(pandemic))) +
+  geom_density(alpha=0.65) +
+  scale_fill_manual(values=c("hotpink4","coral2"), name="", labels=c("Prepandemic (Jan-Nov 2019)", "Pandemic (Jan-Nov 2020)")) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+  panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  xlab("Total Member Tweets") +
+  ylab("Density") +
+  ggtitle("116th House Republican Tweet Frequency Distribution") +
+  xlim(c(0,2500))
+```
+
+Comparing Summary Statistics
+```{r}
+print("Prepandemic All:")
+summary((prepost.compare %>% filter(pandemic==0))$num.tweets)
+print("")
+       
+print("Pandemic All:")
+summary((prepost.compare %>% filter(pandemic==1))$num.tweets)
+print("")
+
+print("Prepandemic Democrats:")
+summary((prepost.compare %>% filter(pandemic==0, party.code==100))$num.tweets)
+print("")
+       
+print("Pandemic Democrats:")
+summary((prepost.compare %>% filter(pandemic==1, party.code==100))$num.tweets)
+print("")
+
+print("Prepandemic Republicans:")
+summary((prepost.compare %>% filter(pandemic==0, party.code==200))$num.tweets)
+print("")
+       
+print("Pandemic Republicans:")
+summary((prepost.compare %>% filter(pandemic==1, party.code==200))$num.tweets)
+print("")
+```
+BOXPLOTS PREPOST
+```{r}
+ggplot(prepost.compare, aes(as.factor(pandemic), num.tweets)) +
+  geom_boxplot(color="purple4") +
+  theme_bw() +
+  xlab("Pandemic Treatment") +
+  ylab("Number of Tweets") +
+  ggtitle("House")
+
+ggplot(prepost.compare %>% filter(party.code==100), aes(as.factor(pandemic), num.tweets)) +
+  geom_boxplot(color="darkblue") +
+  theme_bw() +
+  xlab("Pandemic Treatment") +
+  ylab("Number of Tweets") +
+  ggtitle("House Democrats")
+
+ggplot(prepost.compare %>% filter(party.code==200), aes(as.factor(pandemic), num.tweets)) +
+  geom_boxplot(color="darkred") +
+  theme_bw() +
+  xlab("Pandemic Treatment") +
+  ylab("Number of Tweets") +
+  ggtitle("House Republicans")
+
+#t.test(num.tweets~as.factor(pandemic),data=prepost.compare,paired=T)
+```
+PREPANDEMIC REGRESSIONS
+```{r}
+ohppa.total.jn <- ohppa.total.jn %>% filter(party.code!=328) %>% mutate(party = recode(party.code, `100`=1, `200`=0))
+
+tweets_on_years_pre <- lm(total.tweets ~ year.born, data=ohppa.total.jn)
+tweets_on_years_res_pre <-resid(tweets_on_years)
+tweets_on_party_pre <- lm(total.tweets ~ party, data=ohppa.total.jn)
+tweets_on_years_party_pre <- lm(total.tweets ~ year.born + party, data=ohppa.total.jn)
+tweets_on_years_party_int_pre <- lm(total.tweets ~ year.born*party, data=ohppa.total.jn)
+summary(tweets_on_years_party_int_pre)
+
+ms3 <- modelsummary(list(tweets_on_years_pre, tweets_on_party_pre, tweets_on_years_party_pre, tweets_on_years_party_int_pre), 
+             stars=T,
+             output="kableExtra")
+
+save_kable(ms3, "Tables/tweets_on_age_party_pre.png")
+
+
+# Testing party and dwnom dim1
+tweets_on_dim1_pre <- lm(total.tweets ~ dwnom.dim1, data=ohppa.total.jn)
+tweets_on_years_dim1_pre <- lm(total.tweets ~ year.born + dwnom.dim1, data=ohppa.total.jn)
+tweets_on_years_dim1_int_pre <- lm(total.tweets ~ year.born*dwnom.dim1, data=ohppa.total.jn)
+summary(tweets_on_years_dim1_int_pre)
+
+ms4 <- modelsummary(list(tweets_on_years_pre, tweets_on_dim1_pre, tweets_on_years_dim1_pre, tweets_on_years_dim1_int_pre), 
+             stars=T,
+             output="kableExtra")
+
+save_kable(ms4, "Tables/tweets_on_age_dim1_pre.png")
+
+
+prepost.compare <- prepost.compare %>% filter(party.code!=328) %>% mutate(party = recode(party.code, `100`=1, `200`=0))
+
+ggplot(prepost.compare, aes(x=year.born, y=num.tweets, color=as.factor(pandemic))) +
+  geom_point(size=0.75) +
+  geom_smooth(method="lm") +
+  scale_color_manual(values=c("darkgreen","chocolate3"), name="", labels=c("Prepandemic (Jan-Nov 2019)", "Pandemic (Jan-Nov 2020)")) +
+  theme_bw() +
+  ggtitle("House Tweet Frequency and Year Born") +
+  xlab("Year Born") +
+  ylab("Total Number of Member Tweets")
+
+ggplot(prepost.compare, aes(x=party, y=num.tweets, color=as.factor(pandemic))) +
+  geom_point(size=0.75) +
+  geom_smooth(method="lm") +
+  scale_color_manual(values=c("darkgreen","chocolate3"), name="", labels=c("Prepandemic (Jan-Nov 2019)", "Pandemic (Jan-Nov 2020)")) +
+  theme_bw() +
+  ggtitle("House Tweet Frequency and Party") +
+  xlab("party") +
+  ylab("Total Number of Member Tweets")
+
+ggplot(prepost.compare %>% filter(party==0), aes(x=year.born, y=num.tweets, color=as.factor(pandemic))) +
+  geom_point(size=0.75) +
+  geom_smooth(method="lm") +
+  scale_color_manual(values=c("darkgreen","chocolate3"), name="", labels=c("Prepandemic (Jan-Nov 2019)", "Pandemic (Jan-Nov 2020)")) +
+  theme_bw() +
+  ggtitle("House Democrat Tweet Frequency and Year Born") +
+  xlab("Year Born") +
+  ylab("Total Number of Member Tweets")
+
+ggplot(prepost.compare %>% filter(party==1), aes(x=year.born, y=num.tweets, color=as.factor(pandemic))) +
+  geom_point(size=0.75) +
+  geom_smooth(method="lm") +
+  scale_color_manual(values=c("darkgreen","chocolate3"), name="", labels=c("Prepandemic (Jan-Nov 2019)", "Pandemic (Jan-Nov 2020)")) +
+  theme_bw() +
+  ggtitle("House Republican Tweet Frequency and Year Born") +
+  xlab("Year Born") +
+  ylab("Total Number of Member Tweets")
+
+
+#DW NOM
+
+ggplot(prepost.compare, aes(x=dwnom.dim1, y=num.tweets, color=as.factor(pandemic))) +
+  geom_point(size=0.75) +
+  geom_smooth(method="lm") +
+  scale_color_manual(values=c("darkgreen","chocolate3"), name="", labels=c("Prepandemic (Jan-Nov 2019)", "Pandemic (Jan-Nov 2020)")) +
+  theme_bw() +
+  ggtitle("House Tweet Frequency and Ideology") +
+  xlab("DW-NOMINATE Score") +
+  ylab("Total Number of Member Tweets")
+
+ggplot(prepost.compare, aes(x=abs(dwnom.dim1), y=num.tweets, color=as.factor(pandemic))) +
+  geom_point(size=0.75) +
+  geom_smooth(method="lm") +
+  scale_color_manual(values=c("darkgreen","chocolate3"), name="", labels=c("Prepandemic (Jan-Nov 2019)", "Pandemic (Jan-Nov 2020)")) +
+  theme_bw() +
+  ggtitle("House Tweet Frequency and Ideological Extremity") +
+  xlab("|DW-NOMINATE|") +
+  ylab("Total Number of Member Tweets")
+
+ggplot(prepost.compare %>% filter(party.code==100), aes(x=dwnom.dim1, y=num.tweets, color=as.factor(pandemic))) +
+  geom_point(size=0.75) +
+  geom_smooth(method="lm") +
+  scale_color_manual(values=c("darkgreen","chocolate3"), name="", labels=c("Prepandemic (Jan-Nov 2019)", "Pandemic (Jan-Nov 2020)")) +
+  theme_bw() +
+  ggtitle("House Democrat Tweet Frequency and Ideology") +
+  xlab("DW-NOMINATE Score") +
+  ylab("Total Number of Member Tweets")
+
+ggplot(prepost.compare %>% filter(party.code==200), aes(x=dwnom.dim1, y=num.tweets, color=as.factor(pandemic))) +
+  geom_point(size=0.75) +
+  geom_smooth(method="lm") +
+  scale_color_manual(values=c("darkgreen","chocolate3"), name="", labels=c("Prepandemic (Jan-Nov 2019)", "Pandemic (Jan-Nov 2020)")) +
+  theme_bw() +
+  ggtitle("House Republican Tweet Frequency and Ideology") +
+  xlab("DW-NOMINATE Score") +
+  ylab("Total Number of Member Tweets")
+
+
+```
+

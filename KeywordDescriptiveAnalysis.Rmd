@@ -1,0 +1,412 @@
+---
+title: "Keyword Descriptive Analysis"
+author: "Zayne Sember"
+output: html_notebook
+---
+
+
+```{r, message=FALSE, warn=FALSE}
+library(tidyverse)
+library(lubridate)
+library(gridExtra)
+library(zoo)
+library(forecast)
+```
+
+Prep the data
+```{r}
+# remember to filter out coronary!
+
+prep <- data.text.official.covid.all %>% 
+  filter(chamber=="House") %>% 
+  mutate(tweet.text=tolower(tweet.text))
+
+covid.state$date <- as.Date(covid.state$date)
+covid.CD$date <- as.Date(covid.CD$date)
+
+data.text.keyword.OH <- prep[prep$tweet.text %in% grep(paste(keywords, collapse="|"), 
+                                                       prep$tweet.text, value=T),] %>%
+  filter(!str_detect(tweet.text, "coronary")) %>% # Remove false positives
+  left_join(covid.national, by="date") %>% 
+  left_join(covid.state, by=c("date","state.abb")) %>% 
+  left_join(covid.CD, by=c("date", "state.abb", "district")) %>% 
+  select(-StateName,-StateCode)
+
+ind.keyword.OH <- data.text.keyword.OH %>% 
+  group_by(date, name) %>% 
+  mutate(tweet.count=n(),
+         like.count=sum(likes),
+         retweet.count=sum(retweets)) %>% 
+  select(-tweet.text,-likes,-retweets) %>% 
+  unique()
+
+agg.keyword.OH <- data.text.keyword.OH %>% 
+  group_by(date) %>% 
+  summarize(tweet.count=n(),
+            retweet.count=sum(retweets),
+            like.count=sum(likes),
+            natl.inc.cases=national_incremental_cases,
+            natl.inc.deaths=national_incremental_deaths) %>% 
+  unique()
+
+agg.keyword.OHD <- data.text.keyword.OH %>%
+  filter(party.code==100) %>%
+  group_by(date) %>%
+  summarize(tweet.count=n(),
+            retweet.count=sum(retweets),
+            like.count=sum(likes),
+            natl.inc.cases=national_incremental_cases,
+            natl.inc.deaths=national_incremental_deaths) %>%
+  unique()
+
+agg.keyword.OHD$party <- "Democrats"
+  
+
+agg.keyword.OHR <- data.text.keyword.OH %>%
+  filter(party.code==200) %>%
+  group_by(date) %>%
+  summarize(tweet.count=n(),
+            retweet.count=sum(retweets),
+            like.count=sum(likes),
+            natl.inc.cases=national_incremental_cases,
+            natl.inc.deaths=national_incremental_deaths) %>%
+  unique()
+
+agg.keyword.OHR$party <- "Republicans"
+
+agg.keyword.OHP <- rbind(agg.keyword.OHD, agg.keyword.OHR)
+
+```
+
+Time Series Plots
+
+DEATHS AND TWEETS TIME SERIES
+
+```{r}
+coeff <- 15
+
+ggplot(agg.keyword.OH, aes(x=date)) +
+  geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.57, color="purple4") +
+  geom_line(aes(y=rollmean(natl.inc.deaths / coeff, 7, na.pad =T)), size=0.57, color="green4") +
+  scale_y_continuous(
+    name = "Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "green4"), 
+        axis.text.y.right = element_text(color = "green4"),
+        axis.title.y.right = element_text(color = "green4"),
+        axis.ticks.y.right = element_line(color = "green4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black")) +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("7-day Rolling Average House Keyword Tweets and COVID-19 Deaths")
+
+coeff2 <- 15
+
+ggplot(agg.keyword.OHP, aes(x=date, color=party)) +
+  geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.57) +
+  geom_line(aes(y=rollmean(natl.inc.deaths / coeff2, 7, na.pad =T)), size=0.57, color="green4") +
+  scale_y_continuous(
+    name = "Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "green4"), 
+        axis.text.y.right = element_text(color = "green4"),
+        axis.title.y.right = element_text(color = "green4"),
+        axis.ticks.y.right = element_line(color = "green4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.title = element_blank()) +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  scale_color_manual(values = c("Democrats" = "darkblue",
+                                "Republicans"="darkred"),
+                     ) +
+  ggtitle("7-day Rolling Average House Keyword Tweets by Party and COVID-19 Deaths")
+
+
+```
+
+CASES AND TWEETS TIME SERIES
+
+```{r}
+coeff <- 700
+
+ggplot(agg.keyword.OH, aes(x=date)) +
+  geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.57, color="purple4") +
+  geom_line(aes(y=rollmean(natl.inc.cases / coeff, 7, na.pad =T)), size=0.57, color="green4") +
+  scale_y_continuous(
+    name = "Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Incremental Cases")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "green4"), 
+        axis.text.y.right = element_text(color = "green4"),
+        axis.title.y.right = element_text(color = "green4"),
+        axis.ticks.y.right = element_line(color = "green4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black")) +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("7-day Rolling Average House Keyword Tweets and COVID-19 Cases")
+
+coeff2 <- 800
+
+ggplot(agg.keyword.OHP, aes(x=date, color=party)) +
+  geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.57) +
+  geom_line(aes(y=rollmean(natl.inc.cases / coeff2, 7, na.pad =T)), size=0.57, color="green4") +
+  scale_y_continuous(
+    name = "Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Incremental Cases")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "green4"), 
+        axis.text.y.right = element_text(color = "green4"),
+        axis.title.y.right = element_text(color = "green4"),
+        axis.ticks.y.right = element_line(color = "green4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.title = element_blank()) +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  scale_color_manual(values = c("Democrats" = "darkblue",
+                                "Republicans"="darkred"),
+                     ) +
+  ggtitle("7-day Rolling Average House Keyword Tweets by Party and COVID-19 Cases")
+
+
+```
+
+```{r}
+ggplot(agg.keyword.OH, aes(x=date)) +
+  geom_line(aes(y=rollmean(like.count, 7, na.pad =T)), size=0.57, color="darkblue") +
+  ylab("Likes") +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+    ggtitle("Like Counts on House Member Pandemic Tweets (Jan-Nov 2020)")
+
+ggplot(agg.keyword.OH, aes(x=date)) +
+  geom_line(aes(y=rollmean(retweet.count, 7, na.pad =T)), size=0.57, color="darkblue") +
+  ylab("Retweets") +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+    ggtitle("Retweet Counts on House Member Pandemic Tweets (Jan-Nov 2020)")
+```
+Assessing Synchrony (Naively)
+```{r}
+print("Pearson Correlations")
+print("")
+
+print("Tweets and Cases:")
+cor(agg.keyword.OH$tweet.count, agg.keyword.OH$natl.inc.cases, use="complete.obs")
+print("")
+
+print("Tweets and Deaths:")
+cor(agg.keyword.OH$tweet.count, agg.keyword.OH$natl.inc.deaths, use="complete.obs")
+print("")
+
+print("GOP Tweets and Cases:")
+cor((agg.keyword.OHP %>% filter(party=="Republicans"))$tweet.count, 
+    (agg.keyword.OHP %>% filter(party=="Republicans"))$natl.inc.cases, use="complete.obs")
+print("")
+
+print("GOP Tweets and Deaths:")
+cor((agg.keyword.OHP %>% filter(party=="Republicans"))$tweet.count, 
+    (agg.keyword.OHP %>% filter(party=="Republicans"))$natl.inc.deaths, use="complete.obs")
+print("")
+
+print("Democrat Tweets and Cases:")
+cor((agg.keyword.OHP %>% filter(party=="Democrats"))$tweet.count, 
+    (agg.keyword.OHP %>% filter(party=="Democrats"))$natl.inc.cases, use="complete.obs")
+print("")
+
+print("Democrat Tweets and Deaths:")
+cor((agg.keyword.OHP %>% filter(party=="Democrats"))$tweet.count, 
+    (agg.keyword.OHP %>% filter(party=="Democrats"))$natl.inc.deaths, use="complete.obs")
+print("")
+
+case_lags <- c()
+death_lags <- c()
+for(l in -60:60){
+  if(l<0){
+    case_lags <- c(case_lags, cor(agg.keyword.OH$tweet.count, lead(agg.keyword.OH$natl.inc.cases, abs(l)), use="complete.obs"))
+    death_lags <- c(death_lags, cor(agg.keyword.OH$tweet.count, lead(agg.keyword.OH$natl.inc.deaths, abs(l)), use="complete.obs"))   
+  }
+  
+  else{
+    case_lags <- c(case_lags, cor(agg.keyword.OH$tweet.count, lag(agg.keyword.OH$natl.inc.cases, l), use="complete.obs"))
+    death_lags <- c(death_lags, cor(agg.keyword.OH$tweet.count, lag(agg.keyword.OH$natl.inc.deaths, l), use="complete.obs"))   
+  }
+
+}
+
+lags <- as.data.frame(cbind("lag"=-60:60, case_lags, death_lags))
+
+ggplot(lags, aes(x=lag)) +
+  geom_line(aes(y=case_lags), color="orange2", size=0.57) +
+  geom_line(aes(y=death_lags), color="darkred", size=0.57) +
+  xlab("Lead/Lag") +
+  ylab("Pearson correlation") +
+  ggtitle("Effect of Lead/Lag on Correlation between Tweet Count, Deaths and Cases\n(Jan-Nov 2020)") +
+  theme_bw()
+
+
+cut_date <- as_date("2020-06-01")
+agg.keyword.OH$date <- as_date(agg.keyword.OH$date)
+#agg.keyword.OH$date <- as.Date(agg.keyword.OH$date, format="%Y-%m-%d")
+
+case_lags2 <- c()
+death_lags2 <- c()
+for(l in -60:60){
+  if(l<0){
+    case_lags2 <- c(case_lags2, cor((agg.keyword.OH %>% filter(date >= cut_date))$tweet.count, 
+                                  lead((agg.keyword.OH %>% filter(date >= cut_date))$natl.inc.cases, abs(l)), use="complete.obs"))
+    death_lags2 <- c(death_lags2, cor((agg.keyword.OH %>% filter(date >= cut_date))$tweet.count, 
+                                    lead((agg.keyword.OH %>% filter(date >= cut_date))$natl.inc.deaths, abs(l)), use="complete.obs"))   
+  }
+  
+  else{
+    case_lags2 <- c(case_lags2, cor((agg.keyword.OH %>% filter(date >= cut_date))$tweet.count, 
+                                  lag((agg.keyword.OH %>% filter(date >= cut_date))$natl.inc.cases, l), use="complete.obs"))
+    death_lags2 <- c(death_lags2, cor((agg.keyword.OH %>% filter(date >= cut_date))$tweet.count, 
+                                    lag((agg.keyword.OH %>% filter(date >= cut_date))$natl.inc.deaths, l), use="complete.obs"))   
+  }
+
+}
+
+lags2 <- as.data.frame(cbind("lag"=-60:60, "case_lags"=case_lags2, "death_lags"=death_lags2))
+
+ggplot(lags2, aes(x=lag)) +
+  geom_line(aes(y=case_lags), color="orange2", size=0.57) +
+  geom_line(aes(y=death_lags), color="darkred", size=0.57) +
+  xlab("Lead/Lag") +
+  ylab("Pearson correlation") +
+  ggtitle("Effect of Lead/Lag on Correlation between Tweet Count, Deaths and Cases\n(June-Nov)") +
+  theme_bw()
+```
+Assessing Synchrony (Less Naively)
+```{r}
+tc <- ggCcf(agg.keyword.OH$natl.inc.cases,
+            agg.keyword.OH$tweet.count, 
+            na.action=na.pass) +
+  ggtitle("Tweets and Cases") +
+  xlab("") +
+  ylim(-0.4, .65) +
+  ylab("") +
+  theme_bw()
+  
+
+td <- ggCcf(agg.keyword.OH$natl.inc.deaths,
+            agg.keyword.OH$tweet.count, na.action=na.pass) +
+  ggtitle("Tweets and Deaths") +
+  xlab("") +
+  ylim(-0.4, .65) +
+  ylab("") +
+  theme_bw()
+
+rc <- ggCcf((agg.keyword.OHP %>% filter(party=="Republicans"))$natl.inc.cases, 
+            (agg.keyword.OHP %>% filter(party=="Republicans"))$tweet.count, 
+            na.action=na.pass) +
+  ggtitle("Republican Tweets and Cases") +
+  xlab("") +
+  ylim(-0.4, .65) +
+  ylab("") +
+  theme_bw()
+
+rd <- ggCcf((agg.keyword.OHP %>% filter(party=="Republicans"))$natl.inc.deaths, 
+            (agg.keyword.OHP %>% filter(party=="Republicans"))$tweet.count, 
+            na.action=na.pass) +
+  ggtitle("Republican Tweets and Deaths") +
+  xlab("") +
+  ylim(-0.4, .65) +
+  ylab("") +
+  theme_bw()
+
+dc <- ggCcf((agg.keyword.OHP %>% filter(party=="Democrats"))$natl.inc.cases, 
+            (agg.keyword.OHP %>% filter(party=="Democrats"))$tweet.count, 
+            na.action=na.pass) +
+  ggtitle("Democrat Tweets and Cases") +
+  theme_bw()
+
+dd <- ggCcf((agg.keyword.OHP %>% filter(party=="Democrats"))$natl.inc.deaths, 
+            (agg.keyword.OHP %>% filter(party=="Democrats"))$tweet.count, 
+            na.action=na.pass) +
+  ggtitle("Democrat Tweets and Deaths") +
+  ylim(-0.4, .65) +
+  theme_bw()
+
+grid.arrange(tc, rc, dc)
+grid.arrange(td, rd, dd)
+```
+
+
+MEMBER CORRELATIONS
+```{r}
+member_cor_cd <- c()
+member_cor_state <- c()
+member_cor_natl <- c()
+for(member in unique(ind.keyword.OH$name)){
+  member_cor_cd <- c(member_cor_cd, cor((ind.keyword.OH %>% filter(name==member))$tweet.count,
+                                  (ind.keyword.OH %>% filter(name==member))$cd_incremental_deaths, use="na.or.complete"))
+  
+  member_cor_state <- c(member_cor_state, cor((ind.keyword.OH %>% filter(name==member))$tweet.count,
+                                  (ind.keyword.OH %>% filter(name==member))$state_incremental_deaths, use="na.or.complete"))
+  
+  member_cor_natl <- c(member_cor_natl, cor((ind.keyword.OH %>% filter(name==member))$tweet.count,
+                                  (ind.keyword.OH %>% filter(name==member))$national_incremental_deaths, use="na.or.complete"))
+}
+
+member.cors <- as.data.frame(cbind(name=unique(ind.keyword.OH$name), "member_cor_cd"=as.numeric(unlist(member_cor_cd)), 
+                                   "member_cor_state"=as.numeric(unlist(member_cor_state)), 
+                                   "member_cor_natl"=as.numeric(unlist(member_cor_natl))))
+
+member.cors$member_cor_cd <- as.numeric(member.cors$member_cor_cd)
+member.cors$member_cor_state <- as.numeric(member.cors$member_cor_state)
+member.cors$member_cor_natl <- as.numeric(member.cors$member_cor_natl)
+
+cat("Mean CD Cor:", mean(member.cors$member_cor_cd, na.rm=T),"\n")
+cat("Mean State Cor:", mean(member.cors$member_cor_state, na.rm=T),"\n")
+cat("Mean National Cor:", mean(member.cors$member_cor_natl, na.rm=T),"\n")
+```
+

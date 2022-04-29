@@ -1,0 +1,1851 @@
+---
+title: "Dictionary Analysis"
+output: html_notebook
+---
+
+```{r setup}
+library(tidyverse)
+library(tidytext)
+library(stringr)
+library(stringi)
+library(quanteda)
+library(tm)
+library(kableExtra)
+library(zoo)
+library(lubridate)
+library(grid)
+library(gridExtra)
+```
+
+Group and region definitions
+```{r}
+# GROUPS TAKEN FROM GREEN ET AL 2020
+group_1 <- c("covid", "covid19", "coronavirus", 
+             "beatcoronavirus", "the_virus", "this_virus", 
+             "this_crisis" )
+
+group_2 <- c("wuhan_virus", "wuhan_flu", "chinese_virus", 
+             "china_virus", "chinavirus", "chinahidthevirus",
+             "chinese_virus", "ccp_virus", "chinavirus", 
+             "china_flu", "chinese_flu", "wuhan", "bat_soup", 
+             "kung_flu")
+
+group_3 <- c("social_distance", "social_distancing", "socialdistancing",
+             "hand_sanitizer", "disinfect", "disinfectant", 
+             "disinfecting", "purell", "lysol", "clorox", "swab",
+             "stay_home", "staying_home", "slow_the_spread",
+             "slowthespread", "stayhome", "staying_at_home",
+             "stay_at_home", "shelter_in_place")
+
+group_4 <- c("fauci", "secazar", "azar", 
+             "n95", "flatten_the_curve", "flattenthecurve",
+             "chloroquine", "world_health_organization", 
+             "centers_for_disease_control", "national_institutes_of_health",
+             "quarantine", "quarantined", "quarantines",
+             "quarantining", "self_isolate", "self_isolation", 
+             "self_isolating", "free_testing", "respirator", 
+             "respirators", "ventilator", "ventilators", 
+             "surgical_mask", "face_mask", "facemask", 
+             "virus", "sars", "personal_protective_equipment", 
+             "medical_supplies", "protective_equipment", "antibodies",
+             "immunodeficiencies", "immunocompromised")
+
+group_5 <- c("pandemic", "epidemic", "outbreak", 
+             "national_emergency", "public_health_crisis", "public_health_emergency",
+             "public_health_workers", "frontline_workers")
+
+group_5_0 <- c("transgender", "homelessness", "trafficking",
+               "opioid", "crack_epidemic", "gun_violence",
+               "gunviolence", "shooting", "robocall",
+               "suicide", "tobacco", "vaping", "ecigarette",
+               "e_cig", "substance_abuse", "drug_abuse",
+               "sandyhook","addiction", "hiv/aids", "hiv",
+               "hiv_epidemic", "aids_epidemic", "measles",
+               "worldaidsday", "world_aids_day", "maternal_mortality")
+
+group_6 <- c("economic_injury", "supply_chain", "disaster_relief",
+             "economic_disaster", "disaster_loan", "disaster_loans",
+             "disaster_assistance", "furlough", "furloughed",
+             "furloughs", "sick_leave", "suspend_foreclorures",
+             "jobless_claims", "unemployment_insurance", "unemployment_benefits",
+             "laid_off","layoffs")
+
+group_7 <- c("defense_production_act","relief_package","relief_bill", 
+             "rescue_package", "rescue_bill", "stimulus_payment", 
+             "stimulus_payments", "economic_stimulus", "stimulus_package", 
+             "stimulus_bill", "bailout", "bailouts", "cares_act", 
+             "caresact", "heroes_act", "heroesact")
+
+group_8 <- c("inittogether", "in_this_together", "wish_list", 
+             "nationaldayofprayer", "day_of_prayer")
+
+# Group 9: "school" or "eviction" and "closure" or "moratorium" (after March 1)
+
+# AFTER MARCH 1
+# "school" OR "eviction" AND "closure" OR "moratorium"
+group_9 <- c("school", "eviction", "closure", 
+             "moratorium")
+
+group_9_check <- function(x){
+  return(
+  (str_detect(x, "school") | str_detect(x, "eviction")) & 
+    ((str_detect(x, "closure") | str_detect(x, "moratorium")))
+  )
+}
+
+groups_covid <- c(group_1, group_2, group_3, 
+                  group_4, group_5, group_6, 
+                  group_7, group_8)
+
+
+northeast <- c("NY", "PA", "VT", "NH", "ME", "MA", "CT", "RI", "NJ")
+south <- c("WV", "MD", "DE", "KY", "VA", "TN", "NC", "MS", "AL", "GA", "SC", 
+           "FL", "OK", "AR", "LA", "TX")
+midwest <- c("ND", "MN", "WI", "MI", "SD", "IA", "IL", "IN", "OH", "NE", "MO", 
+             "KS")
+west <- c("WA", "ID", "MT", "OR", "WY", "CA", "NV", "UT", "CO", "AZ", "NM")
+other <- c("AK", "HI")
+```
+
+Text cleaning
+```{r}
+# Sort and add ID to each tweet
+data.text.official.covid.all <- data.text.official.covid.all %>% 
+  arrange(date.time) %>% 
+  mutate(document_ID = seq.int(nrow(data.text.official.covid.all)))
+
+# Fix Sanders party code since he caucuses with Dems
+data.text.official.covid.all <- data.text.official.covid.all %>% mutate(party.code = case_when(
+  name=="Bernie Sanders" ~ 100,
+  TRUE ~ party.code))
+```
+
+```{r}
+# Prepare dataframe that will contain cleaned tweets
+pan.tweets.clean <- data.text.official.covid.all %>% 
+  select(tweet.text, document_ID)
+
+# Remove handles
+pan.tweets.clean$tweet.text <- gsub("@", " ", pan.tweets.clean$tweet.text)
+
+# Remove hashtags
+pan.tweets.clean$tweet.text <- gsub("#", " ", pan.tweets.clean$tweet.text)
+
+# Remove hyperlinks
+url_pattern <- "http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+"
+pan.tweets.clean$tweet.text <- gsub(url_pattern, "", pan.tweets.clean$tweet.text)
+
+# Replace ampersand with and
+pan.tweets.clean$tweet.text <- str_replace_all(pan.tweets.clean$tweet.text, "&amp", "and")
+
+# Remove punctuation, digits, and emojis
+pan.tweets.clean$tweet.text <- gsub("[[:punct:]]", " ", pan.tweets.clean$tweet.text)
+pan.tweets.clean$tweet.text <- gsub("[[:digit:]]", "", pan.tweets.clean$tweet.text)
+pan.tweets.clean$tweet.text <- gsub(" ’", "", pan.tweets.clean$tweet.text)
+pan.tweets.clean$tweet.text <- gsub("'s ", " ", pan.tweets.clean$tweet.text)
+pan.tweets.clean$tweet.text <- gsub("s' ", "s ", pan.tweets.clean$tweet.text)
+pan.tweets.clean$tweet.text <- gsub("’ ", " ", pan.tweets.clean$tweet.text)
+pan.tweets.clean$tweet.text <- gsub("[^\x01-\x7F]", " ", pan.tweets.clean$tweet.text)
+
+# Replace abbreviations with full names
+replacements <- c(" WHO "=" world health organization ", " CDC"=" centers for disease control ",
+                  " UN "=" united nations ", " NIH "=" national institutes of health ",
+                  " USA "=" united states of america ", " US "=" united states ",  
+                  " PPE "=" personal protective equipment ")
+
+pan.tweets.clean$tweet.text <- str_replace_all(pan.tweets.clean$tweet.text, replacements)
+
+# Make text lowercase and trim empty space
+pan.tweets.clean$tweet.text <- str_to_lower(pan.tweets.clean$tweet.text)
+#pan.tweets.clean$tweet.text <- str_trim(pan.tweets.clean$tweet.text, "both")
+
+# Concatenate n-grams
+
+# Common non-covid n-grams listed by Green et al.
+cat_general_names <- c("white house","fox news", "united states", 
+                 "united states of america", "united nations",
+                 "social media", "climate change","right wing","green new deal", 
+                 "nuclear power","cap and trade","clean coal", "gun violence",
+                 "national security", "tax cut", "cut tax","cut taxes",
+                 "president trump", "president trumps", "american people", "trump administration",
+                 "medicare for all", "health care", "health insurance",
+                 "single payer", "assault weapon","assault weapons",
+                 "semi automatic", "second amendment","brady bill",
+                 "high capacity magazine", "high capacity magazines","bump stock",
+                 "bump stocks", "background check", "background checks",
+                 "build the wall", "wall funding","birthright citizenship",
+                 "nuclear deal", "pro life","pro choice","anti choice","born alive",
+                 "partial birth","late term","house democrats","house republicans",
+                 "senate democrats","senate republicans","majority leader",
+                 "minority leader","town hall","donald trump","social security",
+                 "law enforcement","preexisting conditions")
+
+# Add n-grams from false positive group
+cat_general_names <- unique(c(cat_general_names, group_5_0[grepl("_", group_5_0)]))
+
+cat_general <- gsub(" ", "_", cat_general_names)
+
+
+
+names(cat_general) <- cat_general_names
+
+# Common covid n-grams listed by Green et al.
+cat_covid_names <- c("world health organization","centers for disease control", 
+               "supply chain", "shelter in place","defense production act",
+               "personal protective equipment","laid off", "town hall", 
+               "wish list","op ed", "wash your hands", "cares act", "heroes act",
+               "frontline workers", "national institutes of health")
+
+# Add n-grams from dictionary groups
+cat_covid_names <- unique(c(cat_covid_names, groups_covid[grepl("_", groups_covid)]))
+
+cat_covid <- gsub(" ", "_", cat_covid_names)
+
+names(cat_covid) <- cat_covid_names
+
+pan.tweets.clean$tweet.text <- str_replace_all(pan.tweets.clean$tweet.text, cat_general)
+pan.tweets.clean$tweet.text <- str_replace_all(pan.tweets.clean$tweet.text, cat_covid)
+
+# Remove extra spaces
+pan.tweets.clean$tweet.text <- str_replace_all(pan.tweets.clean$tweet.text, "  ", " ")
+pan.tweets.clean$tweet.text <- str_trim(pan.tweets.clean$tweet.text, "both")
+
+```
+
+Flagging
+```{r}
+# ALL GROUPS TOGETHER, WITH ONLY INFO NEEDED FOR AGGREGATION
+pan.tweets.flagged <- pan.tweets.clean %>% 
+  left_join(data.text.official.covid.all %>% select(document_ID, chamber, party.code), by="document_ID") %>% 
+  mutate(
+    covid_flag = as.numeric(
+      str_detect(tweet.text, paste(groups_covid, collapse='|'))
+      | group_9_check(tweet.text) & !str_detect(tweet.text, paste(group_5_0, collapse='|'))
+    )) %>% 
+  mutate(flag_1 = as.numeric(str_detect(tweet.text, 
+               paste(group_1, collapse='|')))) %>% 
+  mutate(flag_2 = as.numeric(str_detect(tweet.text, 
+             paste(group_2, collapse='|')))) %>% 
+  mutate(flag_3 = as.numeric(str_detect(tweet.text, 
+             paste(group_3, collapse='|')))) %>% 
+  mutate(flag_4 = as.numeric(str_detect(tweet.text, 
+             paste(group_4, collapse='|')))) %>% 
+  mutate(flag_5 = as.numeric(str_detect(tweet.text, 
+             paste(group_5, collapse='|')))) %>% 
+  mutate(flag_5_0 = as.numeric(str_detect(tweet.text, 
+             paste(group_5_0, collapse='|')))) %>% 
+  mutate(flag_6 = as.numeric(str_detect(tweet.text, 
+             paste(group_6, collapse='|')))) %>% 
+  mutate(flag_7 = as.numeric(str_detect(tweet.text, 
+             paste(group_7, collapse='|')))) %>% 
+  mutate(flag_8 = as.numeric(str_detect(tweet.text, 
+             paste(group_8, collapse='|')))) %>% 
+  mutate(flag_9 = as.numeric(group_9_check(pan.tweets.clean$tweet.text)))
+```
+
+Merging flags into main dataset
+```{r}
+data.text.official.covid.all <- data.text.official.covid.all %>%
+  #select(-covid_flag) %>% 
+  left_join(pan.tweets.flagged %>% select(document_ID, covid_flag), by="document_ID")
+```
+
+Flagging stats
+```{r}
+# ALL
+flag_count_all <- as.data.frame(table(pan.tweets.flagged$covid_flag))
+
+flag_count_all$percent <- c(round(100*flag_count_all$Freq/sum(flag_count_all$Freq),1))
+
+flag_count_all$Var1 <- c("non-COVID", "COVID")
+
+save_kable(kable(flag_count_all, 
+                 col.names=c("", "count", "%")) %>% 
+             kableExtra::kable_styling(bootstrap_options = "bordered", full_width = F),
+           "Tables/flagcount.png")
+
+group_counts_all <- pan.tweets.flagged %>% 
+  filter(covid_flag==1) %>% 
+  select(-tweet.text, -covid_flag, -document_ID) %>% 
+  pivot_longer(cols=c(flag_1, flag_2, flag_3, flag_4, flag_5,
+               flag_6, flag_7, flag_8, flag_9)) %>% 
+  group_by(value, name) %>% 
+  dplyr::summarize(n=n()) %>% 
+  filter(value==1) %>% 
+  mutate(percent = 100*n/flag_count_all$Freq[2])
+
+write_csv(group_counts_all, "Tables/group_counts_all.csv")
+
+# DEMOCRATS
+flag_count_D <- as.data.frame(table((pan.tweets.flagged %>% filter(party.code==100))$covid_flag))
+
+flag_count_D$percent <- c(round(100*flag_count_D$Freq/sum(flag_count_D$Freq),1))
+
+flag_count_D$Var1 <- c("non-COVID", "COVID")
+
+save_kable(kable(flag_count_D, 
+                 col.names=c("", "count", "%")) %>% 
+             kableExtra::kable_styling(bootstrap_options = "bordered", full_width = F),
+           "Tables/flagcount_D.png")
+
+group_counts_D <- pan.tweets.flagged %>% 
+  filter(party.code==100 & covid_flag==1) %>% 
+  select(-tweet.text, -covid_flag, -document_ID) %>% 
+  pivot_longer(cols=c(flag_1, flag_2, flag_3, flag_4, flag_5,
+               flag_6, flag_7, flag_8, flag_9)) %>% 
+  group_by(value, name) %>% 
+  dplyr::summarize(n=n()) %>% 
+  filter(value==1) %>% 
+  mutate(percent = 100*n/flag_count_D$Freq[2])
+
+write_csv(group_counts_D, "Tables/group_counts_D.csv")
+
+# REPUBLICANS
+flag_count_R <- as.data.frame(table((pan.tweets.flagged %>% filter(party.code==200))$covid_flag))
+
+flag_count_R$percent <- c(round(100*flag_count_R$Freq/sum(flag_count_R$Freq),1))
+
+flag_count_R$Var1 <- c("non-COVID", "COVID")
+
+save_kable(kable(flag_count_R, 
+                 col.names=c("", "count", "%")) %>% 
+             kableExtra::kable_styling(bootstrap_options = "bordered", full_width = F),
+           "Tables/flagcount_R.png")
+
+group_counts_R <- pan.tweets.flagged %>% 
+  filter(party.code==200 & covid_flag==1) %>% 
+  select(-tweet.text, -covid_flag, -document_ID) %>% 
+  pivot_longer(cols=c(flag_1, flag_2, flag_3, flag_4, flag_5,
+               flag_6, flag_7, flag_8, flag_9)) %>% 
+  group_by(value, name) %>% 
+  dplyr::summarize(n=n()) %>% 
+  filter(value==1) %>% 
+  mutate(percent = 100*n/flag_count_R$Freq[2])
+
+write_csv(group_counts_R, "Tables/group_counts_R.csv")
+
+# HOUSE
+flag_count_house <- as.data.frame(table((data.text.official.covid.all %>% filter(chamber=="House"))$covid_flag))
+
+flag_count_house$percent <- c(round(100*flag_count_house$Freq/sum(flag_count_house$Freq),1))
+
+flag_count_house$Var1 <- c("non-COVID", "COVID")
+
+save_kable(kable(flag_count_house, 
+                 col.names=c("", "count", "%")) %>% 
+             kableExtra::kable_styling(bootstrap_options = "bordered", full_width = F),
+           "Tables/flagcount_house.png")
+
+group_counts_house <- pan.tweets.flagged %>% 
+  filter(chamber=="House" & covid_flag==1) %>% 
+  select(-tweet.text, -covid_flag, -document_ID) %>% 
+  pivot_longer(cols=c(flag_1, flag_2, flag_3, flag_4, flag_5,
+               flag_6, flag_7, flag_8, flag_9)) %>% 
+  group_by(value, name) %>% 
+  dplyr::summarize(n=n()) %>% 
+  filter(value==1) %>% 
+  mutate(percent = 100*n/flag_count_house$Freq[2])
+
+write_csv(group_counts_D, "Tables/group_counts_house.csv")
+
+# SENATE
+flag_count_senate <- as.data.frame(table((data.text.official.covid.all %>% filter(chamber=="Senate"))$covid_flag))
+
+flag_count_senate$percent <- c(round(100*flag_count_senate$Freq/sum(flag_count_senate$Freq),1))
+
+flag_count_senate$Var1 <- c("non-COVID", "COVID")
+
+save_kable(kable(flag_count_senate, 
+                 col.names=c("", "count", "%")) %>% 
+             kableExtra::kable_styling(bootstrap_options = "bordered", full_width = F),
+           "Tables/flagcount_senate.png")
+
+group_counts_senate <- pan.tweets.flagged %>% 
+  filter(chamber=="Senate" & covid_flag==1) %>% 
+  select(-tweet.text, -covid_flag, -document_ID) %>% 
+  pivot_longer(cols=c(flag_1, flag_2, flag_3, flag_4, flag_5,
+               flag_6, flag_7, flag_8, flag_9)) %>% 
+  group_by(value, name) %>% 
+  dplyr::summarize(n=n()) %>% 
+  filter(value==1) %>% 
+  mutate(percent = 100*n/flag_count_senate$Freq[2])
+
+write_csv(group_counts_D, "Tables/group_counts_senate.csv")
+
+```
+
+Daily national aggregation in long format
+```{r}
+# All
+temp1 <- data.text.official.covid.all %>% 
+  filter(covid_flag==1) %>%
+  group_by(date) %>% 
+  dplyr::summarize(tweet.count=n(),
+            retweet.count=sum(retweets),
+            like.count=sum(likes)) %>% 
+  unique() %>%
+  mutate(label="All") %>% 
+  ungroup() %>%
+  complete(date,
+           fill = list(tweet.count = 0,
+                       retweet.count = 0,
+                       like.count = 0))
+
+# House
+temp2 <- data.text.official.covid.all %>% 
+  filter(covid_flag==1 & chamber=="House") %>%
+  group_by(date) %>% 
+  dplyr::summarize(tweet.count=n(),
+            retweet.count=sum(retweets),
+            like.count=sum(likes)) %>% 
+  unique() %>%
+  mutate(label="House") %>% 
+  ungroup() %>%
+  complete(date,
+           fill = list(tweet.count = 0,
+                       retweet.count = 0,
+                       like.count = 0))
+
+# Senate
+temp3 <- data.text.official.covid.all %>% 
+  filter(covid_flag==1 & chamber=="Senate") %>%
+  group_by(date) %>% 
+  dplyr::summarize(tweet.count=n(),
+            retweet.count=sum(retweets),
+            like.count=sum(likes)) %>% 
+  unique() %>%
+  mutate(label="Senate") %>% 
+  ungroup() %>%
+  complete(date,
+           fill = list(tweet.count = 0,
+                       retweet.count = 0,
+                       like.count = 0))
+
+# Democrats
+temp4 <- data.text.official.covid.all %>% 
+  filter(covid_flag==1 & party.code==100) %>%
+  group_by(date) %>% 
+  dplyr::summarize(tweet.count=n(),
+            retweet.count=sum(retweets),
+            like.count=sum(likes)) %>% 
+  unique() %>%
+  mutate(label="Democrats") %>% 
+  ungroup() %>%
+  complete(date,
+           fill = list(tweet.count = 0,
+                       retweet.count = 0,
+                       like.count = 0))
+
+# Republicans
+temp5 <- data.text.official.covid.all %>% 
+  filter(covid_flag==1 & party.code==200) %>%
+  group_by(date) %>% 
+  dplyr::summarize(tweet.count=n(),
+            retweet.count=sum(retweets),
+            like.count=sum(likes)) %>% 
+  unique() %>%
+  mutate(label="Republicans") %>% 
+  ungroup() %>%
+  complete(date,
+           fill = list(tweet.count = 0,
+                       retweet.count = 0,
+                       like.count = 0))
+
+# House Democrats
+temp6 <- data.text.official.covid.all %>% 
+  filter(covid_flag==1 & party.code==100 & chamber=="House") %>%
+  group_by(date) %>% 
+  dplyr::summarize(tweet.count=n(),
+            retweet.count=sum(retweets),
+            like.count=sum(likes)) %>% 
+  unique() %>%
+  mutate(label="House Democrats") %>% 
+  ungroup() %>%
+  complete(date,
+           fill = list(tweet.count = 0,
+                       retweet.count = 0,
+                       like.count = 0))
+
+# House Republicans
+temp7 <- data.text.official.covid.all %>% 
+  filter(covid_flag==1 & party.code==200 & chamber=="House") %>%
+  group_by(date) %>% 
+  dplyr::summarize(tweet.count=n(),
+            retweet.count=sum(retweets),
+            like.count=sum(likes)) %>% 
+  unique() %>%
+  mutate(label="House Republicans") %>% 
+  ungroup() %>%
+  complete(date,
+           fill = list(tweet.count = 0,
+                       retweet.count = 0,
+                       like.count = 0))
+
+# Senate Democrats
+temp8 <- data.text.official.covid.all %>% 
+  filter(covid_flag==1 & party.code==100 & chamber=="Senate") %>%
+  group_by(date) %>% 
+  dplyr::summarize(tweet.count=n(),
+            retweet.count=sum(retweets),
+            like.count=sum(likes)) %>% 
+  unique() %>%
+  mutate(label="Senate Democrats") %>% 
+  ungroup() %>%
+  complete(date,
+           fill = list(tweet.count = 0,
+                       retweet.count = 0,
+                       like.count = 0))
+
+# Senate Republicans
+temp9 <- data.text.official.covid.all %>% 
+  filter(covid_flag==1 & party.code==200 & chamber=="Senate") %>%
+  group_by(date) %>% 
+  dplyr::summarize(tweet.count=n(),
+            retweet.count=sum(retweets),
+            like.count=sum(likes)) %>% 
+  unique() %>%
+  mutate(label="Senate Republicans") %>% 
+  ungroup() %>%
+  complete(date,
+           fill = list(tweet.count = 0,
+                       retweet.count = 0,
+                       like.count = 0))
+
+daily.covid.tweets <- rbind(temp1, temp2, temp3,
+                            temp4, temp5, temp6,
+                            temp7, temp8, temp9) %>% 
+  left_join(covid.national, by="date") %>% 
+  rename(natl.inc.cases=national_incremental_cases,
+         natl.inc.deaths=national_incremental_deaths) %>% 
+  arrange(date) %>% 
+  ungroup() %>%
+  complete(label, date,
+           fill = list(tweet.count = 0,
+                       retweet.count = 0,
+                       like.count = 0)) %>%
+  arrange(date)
+
+# clean up
+rm(temp1, temp2, temp3, temp4, temp5, temp6, temp7, temp8, temp9)
+```
+
+Weekly national aggregation in long format
+```{r}
+# Get the ending dates of each 7 day group
+w <- (daily.covid.tweets %>% 
+                  filter(label=="All"))$date[seq(0,nrow(daily.covid.tweets %>% 
+                                                          filter(label=="All"))-1, 7) + 7]
+
+weekly.covid.tweets <- daily.covid.tweets %>% 
+  mutate(weekly_index = sort(rep(1:nrow(daily.covid.tweets %>% filter(label=="All")) %/% 7,
+                                 length(unique(daily.covid.tweets$label))))) %>%
+            group_by(weekly_index, label) %>%
+            summarise(natl.week.inc.cases = sum(replace_na(natl.inc.cases,0)),
+                      natl.week.inc.deaths = sum(replace_na(natl.inc.deaths,0)),
+                      tweet.count=sum(replace_na(tweet.count,0)),
+                      retweet.count=sum(replace_na(retweet.count,0)),
+                      like.count=sum(replace_na(like.count,0))) %>% 
+  ungroup() %>% 
+  mutate(enddate = c(sort(rep(w, 9)), rep(NA, 9))) # pad end with NAs for final incomplete 7-day agg
+  
+rm(w)
+```
+
+[OLD] House daily by geo
+```{r}
+# DAILY HOUSE NATIONAL SUMMARY
+house.dict.covid.natl <- data.text.official.covid.all %>% 
+  filter(covid_flag==1, chamber=="House") %>%
+  left_join(covid.national, by="date") %>% 
+  group_by(date) %>% 
+  dplyr::summarize(tweet.count=n(),
+            retweet.count=sum(retweets),
+            like.count=sum(likes),
+            natl.inc.cases=national_incremental_cases,
+            natl.inc.deaths=national_incremental_deaths) %>% 
+  unique() %>%
+  ungroup() %>%
+  complete(date,
+           fill = list(tweet.count = 0,
+                       retweet.count = 0,
+                       like.count = 0)) %>% 
+  mutate(wday = as.POSIXlt(date)$wday) %>% 
+  mutate(weekend_dummy = case_when(
+    wday %in% c(6,0) ~ 1,
+    TRUE ~ 0))
+
+# STATE BY STATE SUMMARY GROUPED BY REGION
+house.dict.covid.state <- data.text.official.covid.all %>% 
+  filter(covid_flag==1, chamber=="House") %>%
+  left_join(covid.national, by="date") %>% 
+  left_join(covid.state, by=c("date","state.abb")) %>% 
+  left_join(covid.CD, by=c("date", "state.abb", "district")) %>% 
+  select(-StateName,-StateCode) %>% 
+  group_by(date, state.abb) %>% 
+  dplyr::summarize(tweet.count=n(),
+            retweet.count=sum(retweets),
+            like.count=sum(likes),
+            natl.inc.cases=national_incremental_cases,
+            natl.inc.deaths=national_incremental_deaths,
+            state.inc.cases=state_incremental_cases,
+            state.inc.deaths=state_incremental_deaths,
+            cd.inc.cases=cd_incremental_cases,
+            cd.inc.deaths=cd_incremental_deaths) %>%
+  ungroup() %>%
+  complete(date, state.abb,
+           fill = list(tweet.count = 0,
+                       retweet.count = 0,
+                       like.count = 0)) %>% 
+  mutate(region = case_when(
+    state.abb %in% northeast ~ "northeast",
+    state.abb %in% south ~ "south",
+    state.abb %in% midwest ~ "midwest",
+    state.abb %in% west ~ "west",
+    state.abb %in% other ~ "other",
+  )) %>% 
+  group_by(region) %>% 
+  group_split()
+
+# AGGREGATED BY STATE
+house.dict.covid.state.all <- data.text.official.covid.all %>% 
+  filter(covid_flag==1, chamber=="House") %>%
+  left_join(covid.national, by="date") %>% 
+  left_join(covid.state, by=c("date","state.abb")) %>% 
+  left_join(covid.CD, by=c("date", "state.abb", "district")) %>% 
+  select(-StateName,-StateCode) %>% 
+  group_by(date, state.abb) %>% 
+  dplyr::summarize(tweet.count=n(),
+            retweet.count=sum(retweets),
+            like.count=sum(likes),
+            natl.inc.cases=national_incremental_cases,
+            natl.inc.deaths=national_incremental_deaths,
+            state.inc.cases=state_incremental_cases,
+            state.inc.deaths=state_incremental_deaths,
+            cd.inc.cases=cd_incremental_cases,
+            cd.inc.deaths=cd_incremental_deaths) %>%
+  ungroup() %>%
+  complete(date, state.abb,
+           fill = list(tweet.count = 0,
+                       retweet.count = 0,
+                       like.count = 0)) %>% 
+  mutate(region = case_when(
+    state.abb %in% northeast ~ "northeast",
+    state.abb %in% south ~ "south",
+    state.abb %in% midwest ~ "midwest",
+    state.abb %in% west ~ "west",
+    state.abb %in% other ~ "other",
+  ))
+
+# AGGREGATED BY region
+house.dict.covid.region <- house.dict.covid.state.all %>% 
+  group_by(date, region) %>% 
+  dplyr::summarize(tweet.count=sum(tweet.count),
+            retweet.count=sum(retweet.count),
+            like.count=sum(like.count),
+            natl.inc.cases=natl.inc.cases,
+            natl.inc.deaths=natl.inc.deaths,
+            region.inc.cases=sum(state.inc.cases),
+            region.inc.deaths=sum(state.inc.deaths)) %>% 
+  unique()
+```
+
+BREAKING UP BY PARTY NATIONALLY AND REGIONALLY
+```{r}
+# AGGREGATED BY region and party
+house.dict.covid.region.party <- data.text.official.covid.all %>% 
+  filter(covid_flag==1, chamber=="House") %>%
+  left_join(covid.national, by="date") %>%
+  mutate(region = case_when(
+    state.abb %in% northeast ~ "northeast",
+    state.abb %in% south ~ "south",
+    state.abb %in% midwest ~ "midwest",
+    state.abb %in% west ~ "west",
+    state.abb %in% other ~ "other",
+  )) %>% 
+  group_by(date, party.code, region) %>% 
+  dplyr::summarize(tweet.count=n(),
+            retweet.count=sum(retweets),
+            like.count=sum(likes),
+            natl.inc.cases=national_incremental_cases,
+            natl.inc.deaths=national_incremental_deaths) %>% 
+  unique() %>%  
+  ungroup() %>%
+  complete(date, party.code, region,
+           fill = list(tweet.count = 0,
+                       retweet.count = 0,
+                       like.count = 0))
+```
+
+BREAKING UP BY CD
+```{r}
+house.dict.covid.cd <- data.text.official.covid.all %>% 
+  filter(covid_flag==1, chamber=="House") %>%
+  left_join(covid.national, by="date") %>% 
+  left_join(covid.state, by=c("date","state.abb")) %>% 
+  left_join(covid.CD, by=c("date", "state.abb", "district")) %>% 
+  select(-StateName,-StateCode) %>% 
+  group_by(date, state.abb, district) %>% 
+  dplyr::summarize(tweet.count=n(),
+            retweet.count=sum(retweets),
+            like.count=sum(likes),
+            natl.inc.cases=national_incremental_cases,
+            natl.inc.deaths=national_incremental_deaths,
+            state.inc.cases=state_incremental_cases,
+            state.inc.deaths=state_incremental_deaths,
+            cd.inc.cases=cd_incremental_cases,
+            cd.inc.deaths=cd_incremental_deaths) %>%
+  ungroup() %>%
+  complete(date, state.abb, district,
+           fill = list(tweet.count = 0,
+                       retweet.count = 0,
+                       like.count = 0)) %>% 
+  mutate(region = case_when(
+    state.abb %in% northeast ~ "northeast",
+    state.abb %in% south ~ "south",
+    state.abb %in% midwest ~ "midwest",
+    state.abb %in% west ~ "west",
+    state.abb %in% other ~ "other",
+  ))
+```
+
+WHAT DAYS ARE MEMBERS MOSTLY TWEETING ON?
+```{r}
+date_compare <- as.data.frame(rbind(cbind(wday=as.POSIXlt(data.text.official.covid.all$date)$wday, 
+                            type="all"), cbind(house.dict.covid.natl$wday, type="COVID"))) 
+
+group.colors <- c(all = "navyblue", COVID = "darkred")
+
+ggplot(data=date_compare, aes(x=wday, fill=type)) +
+  geom_histogram(stat="count", position="dodge") +
+  scale_x_discrete(labels=c("0"="Sun", "1"="Mon", "2"="Tues",
+                            "3"="Wed", "4"="Thurs", "5"="Fri",
+                            "6"="Sat")) +
+  labs(x="",y="Number of tweets", title="Tweet Distribution by Day of the Week") +
+  scale_fill_manual(values=group.colors) +
+  theme_bw() +
+  theme(legend.title = element_blank())
+
+ggplot(data=date_compare %>% filter(type=="all"), aes(x=wday)) +
+  geom_histogram(stat="count", position="dodge", fill="darkred") +
+  scale_x_discrete(labels=c("0"="Sun", "1"="Mon", "2"="Tues",
+                            "3"="Wed", "4"="Thurs", "5"="Fri",
+                            "6"="Sat")) +
+  labs(x="",y="Number of tweets", title="COVID Tweet Distribution by Day of the Week") +
+  theme_bw() +
+  theme(legend.title = element_blank())
+
+```
+
+DAILY NATIONAL AGGREGATION PLOTS CASES AND DEATHS
+```{r}
+# TWEET COUNT AND NATL DEATHS RAW WITH LOESS TREND LINES
+coeff <- 2
+
+ggplot(daily.covid.tweets %>% filter(label=="All"), aes(x=date)) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="black") +
+  #geom_line(aes(y=rollmean(natl.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="tomato4")
+  geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75, color="black") +
+  geom_line(aes(y=tweet.count), size=0.45, alpha=0.5, color="black") +
+  geom_smooth(aes(y=natl.inc.deaths/coeff), method = "loess", se=F, span=0.1, size = 0.75, color="tomato4") +
+  geom_line(aes(y=natl.inc.deaths/coeff), size=0.45, alpha=0.5, color="tomato4") +
+  scale_y_continuous(
+    name = "Daily Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Daily Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "tomato4"), 
+        axis.text.y.right = element_text(color = "tomato4"),
+        axis.title.y.right = element_text(color = "tomato4"),
+        axis.ticks.y.right = element_line(color = "tomato4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black")) +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Daily COVID Tweets and National Incremental Deaths")
+
+
+# TWEET COUNT AND NATL CASES RAW WITH LOESS TREND LINES
+coeff2 <- 200
+
+ggplot(daily.covid.tweets %>% filter(label=="All"), aes(x=date)) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="black") +
+  #geom_line(aes(y=rollmean(natl.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="green4")
+  geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75, color="black") +
+  geom_line(aes(y=tweet.count), size=0.45, alpha=0.5, color="black") +
+  geom_smooth(aes(y=natl.inc.cases/coeff2), method = "loess", se=F, span=0.1, size = 0.75, color="green4") +
+  geom_line(aes(y=natl.inc.cases/coeff2), size=0.45, alpha=0.5, color="green4") +
+  scale_y_continuous(
+    name = "Daily Tweets",
+    sec.axis = sec_axis(~.*coeff2, name="Daily Incremental Cases")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "green4"), 
+        axis.text.y.right = element_text(color = "green4"),
+        axis.title.y.right = element_text(color = "green4"),
+        axis.ticks.y.right = element_line(color = "green4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black")) +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Daily COVID Tweets and National Incremental Cases")
+```
+
+DAILY NATIONAL BY CHAMBER
+```{r}
+coeff <- 2
+
+ggplot(daily.covid.tweets %>%  filter(label %in% c("House", "Senate")), aes(x=date, color=label)) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="navyblue") +
+  #geom_line(aes(y=rollmean(natl.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="black")
+  geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75) +
+  geom_line(aes(y=tweet.count), size=0.45, alpha=0.25) +
+  geom_smooth(aes(y=natl.inc.deaths/coeff), method = "loess", se=F, span=0.1, size = 0.75, color="green4") +
+  geom_line(aes(y=natl.inc.deaths/coeff), size=0.45, alpha=0.25, color="green4") +
+  scale_color_manual(values= c("House"="darkorange4", "Senate"="magenta4")) +
+  scale_y_continuous(
+    name = "Daily Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Daily Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "green4"), 
+        axis.text.y.right = element_text(color = "green4"),
+        axis.title.y.right = element_text(color = "green4"),
+        axis.ticks.y.right = element_line(color = "green4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.position=c(0.15, 0.96),
+        legend.title=element_blank(),
+        legend.background=element_blank(),
+        legend.direction="horizontal") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Daily COVID Tweets by Chamber and National Incremental Deaths")
+```
+
+DAILY NATIONAL BY PARTY
+```{r}
+coeff <- 4
+
+ggplot(daily.covid.tweets %>%  filter(label %in% c("Democrats", "Republicans")), aes(x=date, color=label)) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="navyblue") +
+  #geom_line(aes(y=rollmean(natl.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="black")
+  geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75) +
+  geom_line(aes(y=tweet.count), size=0.45, alpha=0.25) +
+  geom_smooth(aes(y=natl.inc.deaths/coeff), method = "loess", se=F, span=0.1, size = 0.75, color="green4") +
+  geom_line(aes(y=natl.inc.deaths/coeff), size=0.45, alpha=0.25, color="green4") +
+  scale_color_manual(values= c("Democrats"="navyblue", "Republicans"="darkred")) +
+  scale_y_continuous(
+    name = "Daily Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Daily Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "green4"), 
+        axis.text.y.right = element_text(color = "green4"),
+        axis.title.y.right = element_text(color = "green4"),
+        axis.ticks.y.right = element_line(color = "green4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.position=c(0.5, 0.96),
+        legend.title=element_blank(),
+        legend.background=element_blank(),
+        legend.direction="horizontal") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Daily COVID Tweets by Party and National Incremental Deaths")
+
+
+ggplot(daily.covid.tweets %>%  filter(label %in% c("Democrats", "Republicans")), aes(x=date, color=label)) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="navyblue") +
+  #geom_line(aes(y=rollmean(natl.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="black")
+  geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75) +
+  geom_line(aes(y=tweet.count), size=0.45, alpha=0.25) +
+  scale_color_manual(values= c("Democrats"="navyblue", "Republicans"="darkred")) +
+  scale_y_continuous(
+    name = "Daily Tweets"
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.position=c(0.5, 0.96),
+        legend.title=element_blank(),
+        legend.background=element_blank(),
+        legend.direction="horizontal") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Daily COVID Tweets by Party")
+```
+
+DAILY SENATE BY PARTY
+```{r}
+coeff <- 15
+
+ggplot(daily.covid.tweets %>%  filter(label %in% c("Senate Democrats", "Senate Republicans")), aes(x=date, color=label)) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="navyblue") +
+  #geom_line(aes(y=rollmean(natl.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="black")
+  geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75) +
+  geom_line(aes(y=tweet.count), size=0.45, alpha=0.25) +
+  geom_smooth(aes(y=natl.inc.deaths/coeff), method = "loess", se=F, span=0.1, size = 0.75, color="green4") +
+  geom_line(aes(y=natl.inc.deaths/coeff), size=0.45, alpha=0.25, color="green4") +
+  scale_color_manual(values= c("Senate Democrats"="navyblue", "Senate Republicans"="darkred")) +
+  scale_y_continuous(
+    name = "Daily Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Daily Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "green4"), 
+        axis.text.y.right = element_text(color = "green4"),
+        axis.title.y.right = element_text(color = "green4"),
+        axis.ticks.y.right = element_line(color = "green4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.position=c(0.5, 0.96),
+        legend.title=element_blank(),
+        legend.background=element_blank(),
+        legend.direction="horizontal") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Daily Senate COVID Tweets by Party and National Incremental Deaths")
+```
+
+DAILY HOUSE BY PARTY
+```{r}
+coeff <- 8
+
+ggplot(daily.covid.tweets %>%  filter(label %in% c("House Democrats", "House Republicans")), aes(x=date, color=label)) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="navyblue") +
+  #geom_line(aes(y=rollmean(natl.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="black")
+  geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75) +
+  geom_line(aes(y=tweet.count), size=0.45, alpha=0.25) +
+  geom_smooth(aes(y=natl.inc.deaths/coeff), method = "loess", se=F, span=0.1, size = 0.75, color="green4") +
+  geom_line(aes(y=natl.inc.deaths/coeff), size=0.45, alpha=0.25, color="green4") +
+  scale_color_manual(values= c("House Democrats"="navyblue", "House Republicans"="darkred")) +
+  scale_y_continuous(
+    name = "Daily Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Daily Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "green4"), 
+        axis.text.y.right = element_text(color = "green4"),
+        axis.title.y.right = element_text(color = "green4"),
+        axis.ticks.y.right = element_line(color = "green4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.position=c(0.5, 0.96),
+        legend.title=element_blank(),
+        legend.background=element_blank(),
+        legend.direction="horizontal") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Daily House COVID Tweets by Party and National Incremental Deaths")
+```
+
+WEEKLY NATIONAL AGGREGATION PLOTS CASES AND DEATHS
+```{r}
+coeff <- 2
+
+ggplot(weekly.covid.tweets %>% filter(label=="All"), aes(x=enddate)) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="black") +
+  #geom_line(aes(y=rollmean(natl.week.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="tomato4")
+  #geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75, color="black") +
+  geom_point(aes(y=tweet.count), size=1.4, alpha=0.8, color="black") +
+  geom_line(aes(y=tweet.count), size=0.3, alpha=0.5, color="black") +
+  #geom_smooth(aes(y=natl.week.inc.deaths/coeff), method = "loess", se=F, span=0.1, size = 0.75, color="tomato4") +
+  geom_point(aes(y=natl.week.inc.deaths/coeff), size=1.4, alpha=0.8, color="tomato4", shape=17) +
+  geom_line(aes(y=natl.week.inc.deaths/coeff), size=0.3, alpha=0.5, color="tomato4") +
+  scale_y_continuous(
+    name = "Weekly Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Weekly Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "tomato4"), 
+        axis.text.y.right = element_text(color = "tomato4"),
+        axis.title.y.right = element_text(color = "tomato4"),
+        axis.ticks.y.right = element_line(color = "tomato4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black")) +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Weekly COVID Tweets and National Incremental Deaths")
+
+
+# TWEET COUNT AND NATL CASES RAW WITH LOESS TREND LINES
+coeff2 <- 150
+
+ggplot(weekly.covid.tweets %>% filter(label=="All"), aes(x=enddate)) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="black") +
+  #geom_line(aes(y=rollmean(natl.cum.deaths / coeff, 7, na.pad =T)), size=0.45, color="green4")
+  #geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75, color="black") +
+  geom_point(aes(y=tweet.count), size=1.4, alpha=0.8, color="black") +
+  geom_line(aes(y=tweet.count), size=0.45, alpha=0.5, color="black") +
+  #geom_smooth(aes(y=natl.week.ink.cases/coeff2), method = "loess", se=F, span=0.1, size = 0.75, color="green4") +
+  geom_point(aes(y=natl.week.inc.cases/coeff2), size=1.4, alpha=0.8, color="green4", shape=17) +
+  geom_line(aes(y=natl.week.inc.cases/coeff2), size=0.45, alpha=0.5, color="green4") +
+  scale_y_continuous(
+    name = "Weekly Tweets",
+    sec.axis = sec_axis(~.*coeff2, name="Incremental Cases")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "green4"), 
+        axis.text.y.right = element_text(color = "green4"),
+        axis.title.y.right = element_text(color = "green4"),
+        axis.ticks.y.right = element_line(color = "green4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black")) +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Weekly COVID Tweets and National Incremental Cases")
+```
+
+WEEKLY NATIONAL BY CHAMBER
+```{r}
+coeff <- 3
+
+ggplot(weekly.covid.tweets %>% 
+         filter(label %in% c("House", "Senate")),
+       aes(x=enddate, color=label)) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="black") +
+  #geom_line(aes(y=rollmean(natl.week.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="tomato4")
+  #geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75, color="black") +
+  geom_point(aes(y=tweet.count), size=1.4, alpha=0.8) +
+  geom_line(aes(y=tweet.count), size=0.3, alpha=0.5) +
+  #geom_smooth(aes(y=natl.week.inc.deaths/coeff), method = "loess", se=F, span=0.1, size = 0.75, color="tomato4") +
+  geom_point(aes(y=natl.week.inc.deaths/coeff), size=1.4, alpha=0.8, shape=17, color="green4") +
+  geom_line(aes(y=natl.week.inc.deaths/coeff), size=0.3, alpha=0.5, color="green4") +
+  scale_color_manual(values= c("House"="darkorange4", "Senate"="magenta4")) +
+  scale_y_continuous(
+    name = "Weekly Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Weekly Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "green4"), 
+        axis.text.y.right = element_text(color = "green4"),
+        axis.title.y.right = element_text(color = "green4"),
+        axis.ticks.y.right = element_line(color = "green4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.position=c(0.55, 0.96),
+        legend.title=element_blank(),
+        legend.background=element_blank(),
+        legend.direction="horizontal") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Weekly COVID Tweets by Chamber and National Incremental Deaths")
+```
+
+WEEKLY NATIONAL BY PARTY
+```{r}
+coeff <- 4
+
+ggplot(weekly.covid.tweets %>% 
+         filter(label %in% c("Democrats", "Republicans")),
+       aes(x=enddate, color=label)) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="black") +
+  #geom_line(aes(y=rollmean(natl.week.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="tomato4")
+  #geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75, color="black") +
+  geom_point(aes(y=tweet.count), size=1.4, alpha=0.8) +
+  geom_line(aes(y=tweet.count), size=0.3, alpha=0.5) +
+  #geom_smooth(aes(y=natl.week.inc.deaths/coeff), method = "loess", se=F, span=0.1, size = 0.75, color="tomato4") +
+  geom_point(aes(y=natl.week.inc.deaths/coeff), size=1.4, alpha=0.8, shape=17, color="green4") +
+  geom_line(aes(y=natl.week.inc.deaths/coeff), size=0.3, alpha=0.5, color="green4") +
+  scale_color_manual(values= c("Democrats"="navyblue", "Republicans"="darkred")) +
+  scale_y_continuous(
+    name = "Weekly Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Weekly Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "green4"), 
+        axis.text.y.right = element_text(color = "green4"),
+        axis.title.y.right = element_text(color = "green4"),
+        axis.ticks.y.right = element_line(color = "green4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.position=c(0.55, 0.96),
+        legend.title=element_blank(),
+        legend.background=element_blank(),
+        legend.direction="horizontal") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Weekly COVID Tweets by Party and National Incremental Deaths")
+```
+
+WEEKLY SENATE BY PARTY
+```{r}
+coeff <- 12
+
+ggplot(weekly.covid.tweets %>% 
+         filter(label %in% c("Senate Democrats", "Senate Republicans")),
+       aes(x=enddate, color=label)) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="black") +
+  #geom_line(aes(y=rollmean(natl.week.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="tomato4")
+  #geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75, color="black") +
+  geom_point(aes(y=tweet.count), size=1.4, alpha=0.8) +
+  geom_line(aes(y=tweet.count), size=0.3, alpha=0.5) +
+  #geom_smooth(aes(y=natl.week.inc.deaths/coeff), method = "loess", se=F, span=0.1, size = 0.75, color="tomato4") +
+  geom_point(aes(y=natl.week.inc.deaths/coeff), size=1.4, alpha=0.8, shape=17, color="green4") +
+  geom_line(aes(y=natl.week.inc.deaths/coeff), size=0.3, alpha=0.5, color="green4") +
+  scale_color_manual(values= c("Senate Democrats"="navyblue", "Senate Republicans"="darkred")) +
+  scale_y_continuous(
+    name = "Weekly Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Weekly Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "green4"), 
+        axis.text.y.right = element_text(color = "green4"),
+        axis.title.y.right = element_text(color = "green4"),
+        axis.ticks.y.right = element_line(color = "green4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.position=c(0.6, 0.96),
+        legend.title=element_blank(),
+        legend.background=element_blank(),
+        legend.direction="horizontal") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Senate Weekly COVID Tweets by Party and National Incremental Deaths")
+```
+
+WEEKLY HOUSE BY PARTY
+```{r}
+coeff <- 5
+
+ggplot(weekly.covid.tweets %>% 
+         filter(label %in% c("House Democrats", "House Republicans")),
+       aes(x=enddate, color=label)) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="black") +
+  #geom_line(aes(y=rollmean(natl.week.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="tomato4")
+  #geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75, color="black") +
+  geom_point(aes(y=tweet.count), size=1.4, alpha=0.8) +
+  geom_line(aes(y=tweet.count), size=0.3, alpha=0.5) +
+  #geom_smooth(aes(y=natl.week.inc.deaths/coeff), method = "loess", se=F, span=0.1, size = 0.75, color="tomato4") +
+  geom_point(aes(y=natl.week.inc.deaths/coeff), size=1.4, alpha=0.8, shape=17, color="green4") +
+  geom_line(aes(y=natl.week.inc.deaths/coeff), size=0.3, alpha=0.5, color="green4") +
+  scale_color_manual(values= c("House Democrats"="navyblue", "House Republicans"="darkred")) +
+  scale_y_continuous(
+    name = "Weekly Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Weekly Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "green4"), 
+        axis.text.y.right = element_text(color = "green4"),
+        axis.title.y.right = element_text(color = "green4"),
+        axis.ticks.y.right = element_line(color = "green4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.position=c(0.55, 0.96),
+        legend.title=element_blank(),
+        legend.background=element_blank(),
+        legend.direction="horizontal") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("House Weekly COVID Tweets by Party and National Incremental Deaths")
+```
+
+ALL TWEETS WITH CUMULATIVE DEATHS AND CASES
+```{r}
+# TWEET COUNT AND NATL DEATHS RAW WITH LOESS TREND LINES
+coeff <- 100
+
+ggplot(daily.covid.tweets %>% 
+         filter(label=="All") %>% 
+         mutate(natl.cum.cases=cumsum(replace_na(natl.inc.cases,0)),
+                natl.cum.deaths=cumsum(replace_na(natl.inc.deaths,0))),
+       aes(x=date)) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="black") +
+  #geom_line(aes(y=rollmean(natl.cum.deaths / coeff, 7, na.pad =T)), size=0.45, color="tomato4")
+  geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75, color="black") +
+  geom_line(aes(y=tweet.count), size=0.45, alpha=0.5, color="black") +
+  geom_smooth(aes(y=natl.cum.deaths/coeff), method = "loess", se=F, span=0.1, size = 0.75, color="tomato4") +
+  geom_line(aes(y=natl.cum.deaths/coeff), size=0.45, alpha=0.5, color="tomato4") +
+  scale_y_continuous(
+    name = "Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Cumulative Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "tomato4"), 
+        axis.text.y.right = element_text(color = "tomato4"),
+        axis.title.y.right = element_text(color = "tomato4"),
+        axis.ticks.y.right = element_line(color = "tomato4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black")) +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Daily COVID Tweets and National Cumulative Deaths")
+
+
+# TWEET COUNT AND NATL CASES RAW WITH LOESS TREND LINES
+coeff2 <- 12000
+
+ggplot(daily.covid.tweets %>% 
+         filter(label=="All") %>% 
+         mutate(natl.cum.cases=cumsum(replace_na(natl.inc.cases,0)),
+                natl.cum.deaths=cumsum(replace_na(natl.inc.deaths,0))), aes(x=date)) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="black") +
+  #geom_line(aes(y=rollmean(natl.cum.deaths / coeff, 7, na.pad =T)), size=0.45, color="green4")
+  geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75, color="black") +
+  geom_line(aes(y=tweet.count), size=0.45, alpha=0.5, color="black") +
+  geom_smooth(aes(y=natl.cum.cases/coeff2), method = "loess", se=F, span=0.1, size = 0.75, color="green4") +
+  geom_line(aes(y=natl.cum.cases/coeff2), size=0.45, alpha=0.5, color="green4") +
+  scale_y_continuous(
+    name = "Tweets",
+    sec.axis = sec_axis(~.*coeff2, name="Cumulative Cases")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "green4"), 
+        axis.text.y.right = element_text(color = "green4"),
+        axis.title.y.right = element_text(color = "green4"),
+        axis.ticks.y.right = element_line(color = "green4"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black")) +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Daily COVID Tweets and National Cumulative Cases")
+```
+
+
+STATE TWEETS AND STATE INDICATORS (SCALES NOT ACCURATE FOR SOME REASON)
+
+```{r}
+coeff <- 2
+
+ggplot(data=house.dict.covid.state[[1]],aes(x=date)) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="purple4") +
+  #geom_line(aes(y=rollmean(natl.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="tomato4")
+  geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75, color="purple4") +
+  #geom_line(aes(y=tweet.count), size=0.45, alpha=0.5, color="purple4") +
+  geom_smooth(aes(y=state.inc.deaths/coeff), method = "loess", se=F, span=0.1, size = 0.75, color="tomato4") +
+  #geom_line(aes(y=state.inc.deaths/coeff), size=0.45, alpha=0.5, color="tomato4") +
+  scale_y_continuous(
+    name = "Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        axis.text.x=element_text(size=5),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "tomato4"), 
+        axis.text.y.right = element_text(color = "tomato4"),
+        axis.title.y.right = element_text(color = "tomato4"),
+        axis.ticks.y.right = element_line(color = "black"),
+        axis.line.y.left = element_line(color = "purple4"), 
+        axis.text.y.left = element_text(color = "purple4"),
+        axis.title.y.left = element_text(color = "purple4"),
+        axis.ticks.y.left = element_line(color = "black")) +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Daily House COVID Tweets and State COVID-19 Inc. Deaths") +
+  facet_wrap(~state.abb)
+
+ggplot(data=house.dict.covid.state[[2]],aes(x=date)) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="purple4") +
+  #geom_line(aes(y=rollmean(natl.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="tomato4")
+  geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75, color="purple4") +
+  #geom_line(aes(y=tweet.count), size=0.45, alpha=0.5, color="purple4") +
+  geom_smooth(aes(y=state.inc.deaths/coeff), method = "loess", se=F, span=0.1, size = 0.75, color="tomato4") +
+  #geom_line(aes(y=state.inc.deaths/coeff), size=0.45, alpha=0.5, color="tomato4") +
+  scale_y_continuous(
+    name = "Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        axis.text.x=element_text(size=5),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "tomato4"), 
+        axis.text.y.right = element_text(color = "tomato4"),
+        axis.title.y.right = element_text(color = "tomato4"),
+        axis.ticks.y.right = element_line(color = "black"),
+        axis.line.y.left = element_line(color = "purple4"), 
+        axis.text.y.left = element_text(color = "purple4"),
+        axis.title.y.left = element_text(color = "purple4"),
+        axis.ticks.y.left = element_line(color = "black")) +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Daily House COVID Tweets and State COVID-19 Inc. Deaths") +
+  facet_wrap(~state.abb)
+
+ggplot(data=house.dict.covid.state[[3]],aes(x=date)) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="purple4") +
+  #geom_line(aes(y=rollmean(natl.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="tomato4")
+  geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75, color="purple4") +
+  #geom_line(aes(y=tweet.count), size=0.45, alpha=0.5, color="purple4") +
+  geom_smooth(aes(y=state.inc.deaths/coeff), method = "loess", se=F, span=0.1, size = 0.75, color="tomato4") +
+  #geom_line(aes(y=state.inc.deaths/coeff), size=0.45, alpha=0.5, color="tomato4") +
+  scale_y_continuous(
+    name = "Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        axis.text.x=element_text(size=5),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "tomato4"), 
+        axis.text.y.right = element_text(color = "tomato4"),
+        axis.title.y.right = element_text(color = "tomato4"),
+        axis.ticks.y.right = element_line(color = "black"),
+        axis.line.y.left = element_line(color = "purple4"), 
+        axis.text.y.left = element_text(color = "purple4"),
+        axis.title.y.left = element_text(color = "purple4"),
+        axis.ticks.y.left = element_line(color = "black")) +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Daily House COVID Tweets and State COVID-19 Inc. Deaths") +
+  facet_wrap(~state.abb)
+
+ggplot(data=house.dict.covid.state[[4]],aes(x=date)) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="purple4") +
+  #geom_line(aes(y=rollmean(natl.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="tomato4")
+  geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75, color="purple4") +
+  #geom_line(aes(y=tweet.count), size=0.45, alpha=0.5, color="purple4") +
+  geom_smooth(aes(y=state.inc.deaths/coeff), method = "loess", se=F, span=0.1, size = 0.75, color="tomato4") +
+  #geom_line(aes(y=state.inc.deaths/coeff), size=0.45, alpha=0.5, color="tomato4") +
+  scale_y_continuous(
+    name = "Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        axis.text.x=element_text(size=5),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "tomato4"), 
+        axis.text.y.right = element_text(color = "tomato4"),
+        axis.title.y.right = element_text(color = "tomato4"),
+        axis.ticks.y.right = element_line(color = "black"),
+        axis.line.y.left = element_line(color = "purple4"), 
+        axis.text.y.left = element_text(color = "purple4"),
+        axis.title.y.left = element_text(color = "purple4"),
+        axis.ticks.y.left = element_line(color = "black")) +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Daily House COVID Tweets and State COVID-19 Inc. Deaths") +
+  facet_wrap(~state.abb)
+
+ggplot(data=house.dict.covid.state[[5]],aes(x=date)) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="purple4") +
+  #geom_line(aes(y=rollmean(natl.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="tomato4")
+  geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75, color="purple4") +
+  #geom_line(aes(y=tweet.count), size=0.45, alpha=0.5, color="purple4") +
+  geom_smooth(aes(y=state.inc.deaths/coeff), method = "loess", se=F, span=0.1, size = 0.75, color="tomato4") +
+  #geom_line(aes(y=state.inc.deaths/coeff), size=0.45, alpha=0.5, color="tomato4") +
+  scale_y_continuous(
+    name = "Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        axis.text.x=element_text(size=5),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "tomato4"), 
+        axis.text.y.right = element_text(color = "tomato4"),
+        axis.title.y.right = element_text(color = "tomato4"),
+        axis.ticks.y.right = element_line(color = "black"),
+        axis.line.y.left = element_line(color = "purple4"), 
+        axis.text.y.left = element_text(color = "purple4"),
+        axis.title.y.left = element_text(color = "purple4"),
+        axis.ticks.y.left = element_line(color = "black")) +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Daily House COVID Tweets and State COVID-19 Inc. Deaths") +
+  facet_wrap(~state.abb)
+```
+
+REGION AND PARTY
+
+```{r}
+# BY REGION AND PARTY
+coeffr1 <- 20
+
+r1 <- ggplot(house.dict.covid.region.party %>% filter(region=="northeast" & party.code %in% c(100,200)), aes(x=date, color=factor(party.code))) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="purple4") +
+  #geom_line(aes(y=rollmean(natl.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="tomato4")
+  geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75) +
+  geom_line(aes(y=tweet.count), size=0.45, alpha=0.25) +
+  geom_smooth(aes(y=natl.inc.deaths/coeffr1), method = "loess", se=F, span=0.1, size = 0.75, color="darkgreen") +
+  geom_line(aes(y=natl.inc.deaths/coeffr1), size=0.45, alpha=0.25, color="darkgreen") +
+  scale_y_continuous(
+    name = "Tweets",
+    sec.axis = sec_axis(~.*coeffr1, name="Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "darkgreen"), 
+        axis.text.y.right = element_text(color = "darkgreen"),
+        axis.title.y.right = element_text(color = "darkgreen"),
+        axis.ticks.y.right = element_line(color = "black"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.text=element_text(size=7),
+        legend.position="bottom",
+        legend.margin = margin(-3,-3,-3,-3)) +
+  scale_color_manual(values = c("100"="navyblue", "200"="darkred"),
+                     labels=c("Democrat tweets", "Republican tweets"), name="") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Regional Daily House COVID Tweets and Incremental Deaths (Northeast)")
+
+
+coeffr2 <- 20
+
+r2 <- ggplot(house.dict.covid.region.party %>% filter(region=="south" & party.code %in% c(100,200)), aes(x=date, color=factor(party.code))) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="purple4") +
+  #geom_line(aes(y=rollmean(natl.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="tomato4")
+  geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75) +
+  geom_line(aes(y=tweet.count), size=0.45, alpha=0.25) +
+  geom_smooth(aes(y=natl.inc.deaths/coeffr2), method = "loess", se=F, span=0.1, size = 0.75, color="darkgreen") +
+  geom_line(aes(y=natl.inc.deaths/coeffr2), size=0.45, alpha=0.25, color="darkgreen") +
+  scale_y_continuous(
+    name = "Tweets",
+    sec.axis = sec_axis(~.*coeffr2, name="Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "darkgreen"), 
+        axis.text.y.right = element_text(color = "darkgreen"),
+        axis.title.y.right = element_text(color = "darkgreen"),
+        axis.ticks.y.right = element_line(color = "black"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.text=element_text(size=7),
+        legend.position="bottom",
+        legend.margin = margin(-3,-3,-3,-3)) +
+  scale_color_manual(values = c("100"="navyblue", "200"="darkred"),
+                     labels=c("Democrat tweets", "Republican tweets"), name="") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Regional Daily House COVID Tweets and Incremental Deaths (South)")
+
+
+coeffr3 <- 12
+
+r3 <- ggplot(house.dict.covid.region.party %>% filter(region=="midwest" & party.code %in% c(100,200)), aes(x=date, color=factor(party.code))) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="purple4") +
+  #geom_line(aes(y=rollmean(natl.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="tomato4")
+  geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75) +
+  geom_line(aes(y=tweet.count), size=0.45, alpha=0.25) +
+  geom_smooth(aes(y=natl.inc.deaths/coeffr3), method = "loess", se=F, span=0.1, size = 0.75, color="darkgreen") +
+  geom_line(aes(y=natl.inc.deaths/coeffr3), size=0.45, alpha=0.25, color="darkgreen") +
+  scale_y_continuous(
+    name = "Tweets",
+    sec.axis = sec_axis(~.*coeffr3, name="Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "darkgreen"), 
+        axis.text.y.right = element_text(color = "darkgreen"),
+        axis.title.y.right = element_text(color = "darkgreen"),
+        axis.ticks.y.right = element_line(color = "black"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.text=element_text(size=7),
+        legend.position="bottom",
+        legend.margin = margin(-3,-3,-3,-3)) +
+  scale_color_manual(values = c("100"="navyblue", "200"="darkred"),
+                     labels=c("Democrat tweets", "Republican tweets"), name="") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Regional Daily House COVID Tweets and Incremental Deaths (Midwest)")
+
+
+coeffr4 <- 12
+
+r4 <- ggplot(house.dict.covid.region.party %>% filter(region=="west" & party.code %in% c(100,200)), aes(x=date, color=factor(party.code))) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="purple4") +
+  #geom_line(aes(y=rollmean(natl.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="tomato4")
+  geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75) +
+  geom_line(aes(y=tweet.count), size=0.45, alpha=0.25) +
+  geom_smooth(aes(y=natl.inc.deaths/coeffr4), method = "loess", se=F, span=0.1, size = 0.75, color="darkgreen") +
+  geom_line(aes(y=natl.inc.deaths/coeffr4), size=0.45, alpha=0.25, color="darkgreen") +
+  scale_y_continuous(
+    name = "Tweets",
+    sec.axis = sec_axis(~.*coeffr4, name="Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "darkgreen"), 
+        axis.text.y.right = element_text(color = "darkgreen"),
+        axis.title.y.right = element_text(color = "darkgreen"),
+        axis.ticks.y.right = element_line(color = "black"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.text=element_text(size=7),
+        legend.position="bottom",
+        legend.margin = margin(-3,-3,-3,-3)) +
+  scale_color_manual(values = c("100"="navyblue", "200"="darkred"),
+                     labels=c("Democrat tweets", "Republican tweets"), name="") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Regional Daily House COVID Tweets and Incremental Deaths (West)")
+
+coeffr5 <- 500
+
+r5 <- ggplot(house.dict.covid.region.party %>% filter(region=="other" & party.code %in% c(100,200)), aes(x=date, color=factor(party.code))) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="purple4") +
+  #geom_line(aes(y=rollmean(natl.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="tomato4")
+  geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75) +
+  geom_line(aes(y=tweet.count), size=0.45, alpha=0.25) +
+  geom_smooth(aes(y=natl.inc.deaths/coeffr5), method = "loess", se=F, span=0.1, size = 0.75, color="darkgreen") +
+  geom_line(aes(y=natl.inc.deaths/coeffr5), size=0.45, alpha=0.25, color="darkgreen") +
+  scale_y_continuous(
+    name = "Tweets",
+    sec.axis = sec_axis(~.*coeffr5, name="Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "darkgreen"), 
+        axis.text.y.right = element_text(color = "darkgreen"),
+        axis.title.y.right = element_text(color = "darkgreen"),
+        axis.ticks.y.right = element_line(color = "black"),
+        axis.line.y.left = element_line(color = "black"), 
+        axis.text.y.left = element_text(color = "black"),
+        axis.title.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.text=element_text(size=7),
+        legend.position="bottom",
+        legend.margin = margin(-3,-3,-3,-3)) +
+  scale_color_manual(values = c("100"="navyblue", "200"="darkred"),
+                     labels=c("Democrat tweets", "Republican tweets"), name="") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Regional Daily House COVID Tweets and Incremental Deaths (AK and HI)")
+
+# library(cowplot)
+# 
+# legend <- get_legend(
+#   # create some space to the left of the legend
+#   r1 + theme(legend.box.margin = margin(0, 0, 0, 5),
+#              legend.position="bottom")
+# )
+
+# plot_grid(r1 + ggtitle("") + theme(legend.position="none"), 
+#           r2 + ggtitle("") + theme(legend.position="none"),
+#           NA, legend,
+#           ncol=2, rel_widths = c(3, 3, 1)) 
+          # r3 + ggtitle(""),
+          # r4 + ggtitle(""),
+          # r5 + ggtitle(""), ncol=1)
+r1
+r2
+r3
+r4
+r5
+```
+
+INDIVIDUAL STATE
+
+```{r}
+state_filter <- "IL"
+
+coeff <- 2
+
+ggplot(house.dict.covid.state.all %>% filter(state.abb==state_filter), aes(x=date)) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="purple4") +
+  #geom_line(aes(y=rollmean(natl.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="tomato4")
+  geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75, color="purple4") +
+  geom_line(aes(y=tweet.count), size=0.45, alpha=0.5, color="purple4") +
+  geom_smooth(aes(y=natl.inc.deaths/coeff), method = "loess", se=F, span=0.1, size = 0.75, color="tomato4") +
+  geom_line(aes(y=natl.inc.deaths/coeff), size=0.45, alpha=0.5, color="tomato4") +
+  scale_y_continuous(
+    name = "Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "tomato4"), 
+        axis.text.y.right = element_text(color = "tomato4"),
+        axis.title.y.right = element_text(color = "tomato4"),
+        axis.ticks.y.right = element_line(color = "black"),
+        axis.line.y.left = element_line(color = "purple4"), 
+        axis.text.y.left = element_text(color = "purple4"),
+        axis.title.y.left = element_text(color = "purple4"),
+        axis.ticks.y.left = element_line(color = "black")) +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle("Daily House COVID Tweets and National COVID-19 Inc. Deaths")
+```
+
+INDIVIDUAL CD
+
+```{r}
+state_filter <- "NY"
+cd_filter <- 14
+
+coeff <- 1
+
+ggplot(house.dict.covid.cd %>% 
+         filter(state.abb==state_filter & district==cd_filter),
+       aes(x=date)) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="purple4") +
+  #geom_line(aes(y=rollmean(natl.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="tomato4")
+  geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.75, color="purple4") +
+  geom_line(aes(y=tweet.count), size=0.5, alpha=1, color="purple4") +
+  geom_smooth(aes(y=cd.inc.deaths/coeff), method = "loess", se=F, span=0.1, size = 0.75, color="tomato4") +
+  geom_line(aes(y=cd.inc.deaths/coeff), size=0.5, alpha=1, color="tomato4") +
+  scale_y_continuous(
+    name = "Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "tomato4"), 
+        axis.text.y.right = element_text(color = "tomato4"),
+        axis.title.y.right = element_text(color = "tomato4"),
+        axis.ticks.y.right = element_line(color = "black"),
+        axis.line.y.left = element_line(color = "purple4"), 
+        axis.text.y.left = element_text(color = "purple4"),
+        axis.title.y.left = element_text(color = "purple4"),
+        axis.ticks.y.left = element_line(color = "black")) +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle(paste(state_filter, "-", cd_filter," COVID Tweets and National COVID-19 Inc. Deaths", sep=""))
+```
+
+```{r}
+coeff <- 1
+
+ggplot(house.dict.covid.cd %>% filter(state.abb=="NY") %>% mutate(col=paste(state.abb, district, sep="-")),
+       aes(x=date, color=factor(col))) +
+  #geom_line(aes(y=rollmean(tweet.count, 7, na.pad =T)), size=0.45, color="purple4") +
+  #geom_line(aes(y=rollmean(natl.inc.deaths / coeff, 7, na.pad =T)), size=0.45, color="tomato4")
+  geom_smooth(aes(y=tweet.count), method = "loess", se=F, span=0.1, size = 0.1) +
+  #geom_line(aes(y=tweet.count), size=0.5, alpha=1, color="purple4") +
+  #geom_smooth(aes(y=cd.inc.deaths/coeff), method = "loess", se=F, span=0.1, size = 0.75, color="tomato4") +
+  #geom_line(aes(y=cd.inc.deaths/coeff), size=0.5, alpha=1, color="tomato4") +
+  scale_y_continuous(
+    name = "Tweets",
+    sec.axis = sec_axis(~.*coeff, name="Incremental Deaths")
+  ) +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y = element_text(size = 7,
+                                    margin = margin(r = 10)),
+        axis.text.y=element_text(size=8),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        axis.line.y.right = element_line(color = "tomato4"), 
+        axis.text.y.right = element_text(color = "tomato4"),
+        axis.title.y.right = element_text(color = "tomato4"),
+        axis.ticks.y.right = element_line(color = "black"),
+        axis.line.y.left = element_line(color = "purple4"), 
+        axis.text.y.left = element_text(color = "purple4"),
+        axis.title.y.left = element_text(color = "purple4"),
+        axis.ticks.y.left = element_line(color = "black"),
+        legend.position="none") +
+  scale_x_date(date_breaks="1 month", date_labels="%b") +
+  ggtitle(paste(state_filter, "-", cd_filter," COVID Tweets and National COVID-19 Inc. Deaths", sep=""))
+```
+
+```{r}
+# USEFUL LATER FOR TOPIC ANALYSIS:
+# Unnest tokens and remove stop words
+# pan.tokens <- pan.tweets.clean %>% 
+#   unnest_tokens(word, tweet.text) %>% 
+#   anti_join(stop_words)
+
+# Tokenizes ngrams into bigram pairs to preserve word order as Green et al do
+# ngram_tokenizer <- function(ngram_str){
+#   
+#   ngram_split <- str_split(ngram_str, "_")[[1]]
+#   
+#   retVal <- c(ngram_split[1])
+#   
+#   for(i in 1:(length(ngram_split)-1)){
+#     retVal <- c(retVal, paste(ngram_split[i], ngram_split[i+1], sep="_"))
+#   }
+#   
+#   # Avoids repeating the whole ngram twice when n=2
+#   if(length(ngram_split)>2) retVal <- c(retVal, ngram_str)
+#   
+#   return(retVal)
+# }
+
+# Assign ID to each token (including ngrams) then tokenize and stem
+# pan.tokens <- pan.tokens %>% 
+#   mutate(word_ID=seq.int(nrow(pan.tokens))) %>% 
+#   rowwise() %>% 
+#   mutate(stem=case_when(
+#     grepl("_", word) ~ paste(ngram_tokenizer(word), collapse=","),
+#     !grepl("_", word) ~ char_wordstem(word))) %>% 
+#   separate_rows(stem, sep=",")
+# 
+# pan.tokens <- pan.tokens %>% 
+#   mutate(token_ID=seq.int(nrow(pan.tokens)))
+# 
+# pan.tokens <- pan.tokens %>% 
+#   count(document_ID, stem)
+
+
+# pan.dtm <- pan.tokens %>% 
+#    cast_dtm(document = document_ID, term = stem, value = n)
+# 
+# freq <- findFreqTerms(pan.dtm, 
+#                            lowfreq = 100, 
+#                            highfreq = nrow(pan.dtm)*0.5
+#                            ) 
+# pan.dtm <- pan.dtm[ , freq]
+
+
+
+# set.seed(128)
+# test_sample <- sample_n(pan.tokens, 10000)
+# 
+# 
+# 
+# data.text.official.covid.all %>% 
+#   filter(ID %in% pan.tokens$ID[grepl(c("caresact"), pan.tokens$word)]) %>% 
+#   View()
+# 
+# pan.tweets.clean %>% 
+#   filter(ID %in% pan.tokens$ID[grepl("heroesact", pan.tokens$word)]) %>% 
+#   View()
+
+```

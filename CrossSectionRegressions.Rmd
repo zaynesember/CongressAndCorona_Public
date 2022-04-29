@@ -1,0 +1,3772 @@
+---
+title: "Cross-sectional Regressions"
+output: html_notebook
+---
+```{r setup}
+library(tidyverse)
+library(tidytext)
+library(kableExtra)
+library(zoo)
+library(lubridate)
+library(grid)
+library(gridExtra)
+library(readxl)
+library(stringi)
+library(haven)
+library(cdlTools)
+library(ggeffects)
+library(modelsummary)
+library(sjPlot)
+library(sjmisc)
+
+# Prepares lm objects for plotting
+plotify <- function(model){
+  retVal <- tidy(model, conf.int = TRUE) %>% 
+    filter(term != "(Intercept)")
+    return(retVal[,1:7])
+  }
+```
+
+Get tweet counts in cross-sectional form, merge member and constituency factors
+```{r}
+library(Hmisc)
+
+tweet.totals.official <- data.text.official.covid.all %>% group_by(name) %>% 
+  select(-tweet.text, -date.time, -client, 
+         -retweets, -likes, -date, -document_ID) %>% 
+  group_by(name) %>% 
+  mutate(total.covid.tweets= sum(covid_flag),
+         total.tweets=n()) %>% 
+  select(-covid_flag) %>% 
+  unique() %>% 
+  mutate(tweet.share.covid = total.covid.tweets/total.tweets) %>% 
+  mutate(party=recode(party.code, `100`=1, `200`=0)) %>% 
+  select(-party.code) %>% 
+  mutate(age=2020-year.born) %>% 
+  group_by(chamber) %>% 
+  arrange(chamber, name) %>% 
+  left_join(
+    pan.tweets.flagged.ind %>%
+      ungroup() %>% 
+      group_by(name) %>% 
+      dplyr::summarize(group5.tweet.all.share = sum(flag_5)/n(),
+        group5.tweet.covid.share = sum(flag_5)/sum(covid_flag),
+        group6.tweet.all.share = sum(flag_6)/n(),
+        group6.tweet.covid.share = sum(flag_6)/sum(covid_flag)),
+    by="name")
+  
+
+CEL_Senate <- read_excel("Data/Member_Factors/CELSenate93to116.xlsx") %>% filter(congressnumber==116) %>% 
+  select(lastname, state.abb, district, year.born, year.elected, gender, african.american, latino, last.vote.share, committee.chair,
+         subcommittee.chair, seniority, sponsored.bills, effectiveness.score)
+
+CEL_House <- read_excel("Data/Member_Factors/CELHouse93to116.xlsx") %>% filter(congressnumber==116) %>% 
+  select(lastname, state.abb, district, year.born, year.elected, gender, african.american, latino, last.vote.share, committee.chair,
+         subcommittee.chair, seniority, sponsored.bills, effectiveness.score)
+
+CEL_All <- rbind(CEL_House, CEL_Senate)
+rm(CEL_House, CEL_Senate)
+
+tweet.totals.official <- full_join(tweet.totals.official, CEL_All, by=c("state.abb", "district", "year.born")) %>% filter(!is.na(name)) %>% unique()
+
+
+# CCES2018 <- read_stata("Data/Constituency_Factors/CCES2018/cces18_common_vv.dta") %>% 
+#   select(inputstate, cdid116, pid7, pid3, ideo5, birthyr,
+#          race, urbancity, educ, employ, faminc_new, union) %>% 
+#   rename(state=inputstate, district=cdid116, family.income=faminc_new) %>% 
+#   mutate(district=as.numeric(district),
+#          state=fips(state, to="Abbreviation"))
+
+CCES2020 <- read_stata("Data/Constituency_Factors/CCES2020/CES20_Common_OUTPUT_vv.dta") %>%
+  select(inputstate, cdid116, pid7, pid3, ideo5, birthyr,
+         race, urbancity, educ, employ, faminc_new, union) %>%
+  rename(state=inputstate, district=cdid116, family.income=faminc_new) %>%
+  mutate(district=as.numeric(district),
+         state=fips(state, to="Abbreviation")) 
+
+# pid3
+pid3.df <- CCES2020 %>% select(state, district, pid3) %>% group_by(state, district) %>%
+  count(pid3) %>% rename(pid3.count=n) %>% mutate(pid3.total.cd=sum(pid3.count)) %>%
+  dplyr::summarize(pid3=pid3, pid3.share = round(pid3.count/pid3.total.cd,3), across()) %>%
+  mutate(pid3=recode(as.numeric(pid3), `1`="democrat.cd", `2`="republican.cd",
+                     `3`="independent", `4`="other",
+                     `5`="unsure")) %>%
+  pivot_wider(names_from=pid3, 
+              values_from=c(pid3.share, pid3.count)) %>% 
+  select(-contains("_NA"), -contains("unsure"), -contains("other"), -contains("independent"))
+
+tweet.totals.official <- full_join(tweet.totals.official, pid3.df, by=c("state.abb"="state", "district"="district"))
+rm(pid3.df)
+
+# pid7
+pid7.df <- CCES2020 %>% select(state, district, pid7) %>% group_by(state, district) %>% 
+  count(pid7) %>% rename(pid7.count=n) %>% mutate(pid7.total.cd=sum(pid7.count)) %>%
+  dplyr::summarize(pid7=pid7, pid7.share = round(pid7.count/pid7.total.cd,3), across()) %>%
+  mutate(pid7=recode(as.numeric(pid7), `1`="strongdem", `2`="weakdem",
+                     `3`="leandem", `4`="independent",
+                     `5`="leanrep", `6`="weakrep",
+                     `7`="strongrep", `8`="unsure")) %>%
+  pivot_wider(names_from=pid7, 
+              values_from=c(pid7.share, pid7.count)) %>%
+  mutate(pid7.share_democrat.cd=pid7.share_strongdem + pid7.share_weakdem + pid7.share_leandem,
+         pid7.share_republican.cd=pid7.share_strongrep + pid7.share_weakrep + pid7.share_leanrep,
+         pid7.count_democrat.cd=pid7.count_strongdem + pid7.count_weakdem + pid7.count_leandem,
+         pid7.count_republican.cd=pid7.count_strongrep + pid7.count_weakrep + pid7.count_leanrep
+         ) %>% 
+  select(state, district, pid7.share_democrat.cd, pid7.share_republican.cd, pid7.total.cd,
+         pid7.count_democrat.cd, pid7.count_republican.cd)
+
+tweet.totals.official <- full_join(tweet.totals.official, pid7.df, by=c("state.abb"="state", "district"="district"))
+rm(pid7.df)
+
+#ideo5 cd
+ideo5.df <- CCES2020 %>% select(state, district, ideo5) %>% group_by(state, district) %>%
+  mutate(ideo5=recode(as.numeric(ideo5), `1`=-2, `2`=-1,
+                     `3`=0, `4`=1, `5`=2, `6`=NA_real_)) %>%
+  dplyr::summarize(ideo5.cd = round(mean(ideo5, na.rm=T),3))
+
+tweet.totals.official <- full_join(tweet.totals.official, ideo5.df, by=c("state.abb"="state", "district"="district"))
+rm(ideo5.df)
+
+#ideo5 state
+ideo5.df <- CCES2020 %>% select(state, ideo5) %>% group_by(state) %>%
+  mutate(ideo5=recode(as.numeric(ideo5), `1`=-2, `2`=-1,
+                     `3`=0, `4`=1, `5`=2, `6`=NA_real_)) %>%
+  dplyr::summarize(ideo5.state = round(mean(ideo5, na.rm=T),3))
+
+tweet.totals.official <- full_join(tweet.totals.official, ideo5.df, by=c("state.abb"="state"))
+rm(ideo5.df)
+
+# birthyr cd
+birthyr.df <- CCES2020 %>% select(state, district, birthyr) %>% group_by(state, district) %>%
+  mutate(age = 2020-birthyr) %>% 
+  dplyr::summarize(mean.age.cd = round(mean(age, na.rm=T),1),
+            median.age.cd = median(age, na.rm=T))
+
+tweet.totals.official <- full_join(tweet.totals.official, birthyr.df, by=c("state.abb"="state", "district"="district"))
+rm(birthyr.df)
+
+# birthyr state
+birthyr.df <- CCES2020 %>% select(state, birthyr) %>% group_by(state) %>%
+  mutate(age = 2020-birthyr) %>% 
+  dplyr::summarize(mean.age.state = round(mean(age, na.rm=T),1),
+            median.age.state = median(age, na.rm=T))
+
+tweet.totals.official <- full_join(tweet.totals.official, birthyr.df, by=c("state.abb"="state"))
+rm(birthyr.df)
+
+# race
+race.df <- CCES2020 %>% select(state, district, race) %>% group_by(state, district) %>%
+  count(race) %>% rename(race.count=n) %>% mutate(race.total.cd=sum(race.count)) %>%
+  dplyr::summarize(race=race, race.share = round(race.count/race.total.cd,3), across()) %>%
+  mutate(race=recode(as.numeric(race), `1`="white.cd", `2`="black.cd",
+                     `3`="hispanic.cd", `4`="asian.cd", `5`="native.cd",
+                     `6`="mixed.cd", `7`="other.cd", `8`="middleeast.cd")) %>%
+  pivot_wider(names_from=race, 
+              values_from=c(race.share, race.count)) %>% 
+  select(state,district, contains("white"), contains("black"), contains("hispanic"), race.total.cd)
+
+tweet.totals.official <- full_join(tweet.totals.official, race.df, by=c("state.abb"="state", "district"="district"))
+rm(race.df)
+
+# Calculate state level for pid3, pid7, race
+
+tweet.totals.official <- tweet.totals.official %>% group_by(state.abb) %>% 
+  mutate(pid3.share_democrat.state=round(sum(pid3.count_democrat.cd, na.rm=T)/sum(pid3.total.cd, na.rm=T),3),
+         pid3.share_republican.state=round(sum(pid3.count_republican.cd, na.rm=T)/sum(pid3.total.cd, na.rm=T),3),
+         pid7.share_democrat.state=round(sum(pid7.count_democrat.cd, na.rm=T)/sum(pid7.total.cd, na.rm=T),3),
+         pid7.share_republican.state=round(sum(pid7.count_republican.cd, na.rm=T)/sum(pid7.total.cd, na.rm=T),3),
+         race.share_white.state=round(sum(race.count_white.cd, na.rm=T)/sum(race.total.cd, na.rm=T),3),
+         race.share_black.state=round(sum(race.count_black.cd, na.rm=T)/sum(race.total.cd, na.rm=T),3),
+         race.share_hispanic.state=round(sum(race.count_hispanic.cd, na.rm=T)/sum(race.total.cd, na.rm=T),3)) %>% 
+  select(-contains(".count"), -contains(".total."))
+
+# Get 2010 Census data for employment info
+Census2010 <- read.csv("Data/Constituency_Factors/Census2010.csv") %>% 
+  filter(CongDist!="", CongDist!="ZZ")
+
+# Complete label row
+Census2010[1,1] <- "State"
+
+# Assign labels
+label(Census2010) <- Census2010[1,]
+
+# Remove label row
+Census2010 <- Census2010[2:nrow(Census2010),]
+
+# Reformat dollars in characters to numeric
+Census2010[,3] <- parse_number(Census2010[,3])
+Census2010[,4] <- parse_number(Census2010[,4])
+Census2010[,5] <- parse_number(Census2010[,5])
+
+Census2010$state.abb <- fips(Census2010$State, to="Abbreviation")
+
+Census2010[,1:62] <- Census2010[,1:62] %>% mutate_if(is.character, parse_number)
+
+# Aggregated by state
+Census2010.state <- Census2010 %>% select(-contains("pct")) %>% group_by(state.abb) %>% 
+  mutate(statePop = sum(TotPop)) %>% 
+  dplyr::summarize(pctLaborForce.state = round(sum(LaborForce)/statePop,3),
+             pctCivLabForce.state = round(sum(CivLabForce)/statePop,3),
+             pctManufacturing.state = round(sum(Manufacturing)/statePop,3),
+             pctRetailTrade.state = round(sum(RetailTrade)/statePop,3),
+             pctEduc_Health_SocSvcs.state = round(sum(Educ_Health_SocSvcs)/statePop,3),
+             pctConstruction.state = round(sum(Construction)/statePop,3),
+             pctGovWorkers.state = round(sum(GovWorkers)/statePop,3),
+             pctSelfEmpWorkers.state = round(sum(SelfEmpWorkers)/statePop,3),
+             by=state.abb) %>% unique()
+
+# Aggregated by cd
+Census2010.cd <- Census2010 %>% select(state.abb, CongDist, pctLaborForce,
+                      pctCivLabForce, pctManufacturing, pctRetailTrade,
+                      pctEduc_Health_SocSvcs, pctConstruction, pctGovWorkers,
+                      pctSelfEmpWorkers) %>% 
+  transmute(pctLaborForce.cd = pctLaborForce/100,
+    pctCivLabForce.cd = pctCivLabForce/100,
+    pctManufacturing.cd = pctManufacturing/100,
+    pctRetailTrade.cd = pctRetailTrade/100,
+    pctEduc_Health_SocSvcs.cd = pctEduc_Health_SocSvcs/100,
+    pctConstruction.cd = pctConstruction/100,
+    pctGovWorkers.cd = pctGovWorkers/100,
+    pctSelfEmpWorkers.cd = pctSelfEmpWorkers/100,
+    district=recode(CongDist, `0`=1),
+    state.abb=state.abb)
+
+# Merge state data
+tweet.totals.official <- left_join(tweet.totals.official, Census2010.state, by="state.abb") %>% select(-by)
+
+# Merge CD data
+tweet.totals.official <- left_join(tweet.totals.official, Census2010.cd, by=c("state.abb","district"))
+
+
+# Census 2010 Urbanicity Data
+Census2010UrbanRural <- read_excel("Data/Constituency_Factors/Census2010UrbanRural.xlsx", 
+           sheet="Data") %>% 
+  drop_na() %>% 
+  mutate(
+    pctRural.cd=round(PctRural.cd,3),
+    pctUrban.cd=round(PctUrban.cd,3)) %>% 
+  select(-PctRural.cd, -PctUrban.cd) %>% 
+  rename(district=District)
+
+Census2010UrbanRural[,3:5] <- Census2010UrbanRural[,3:5] %>% mutate_if(is.character, parse_number)
+
+Census2010UrbanRural$state.abb <- state.abb[match(Census2010UrbanRural$State,state.name)]
+
+
+Census2010UrbanRural.state <- Census2010UrbanRural %>% group_by(state.abb) %>% 
+  dplyr::summarize(
+    pctRural.state = round(sum(TotalRural)/sum(TotalHouseholds),3),
+    pctUrban.state = round(sum(TotalUrban)/sum(TotalHouseholds),3),
+  )
+
+
+Census2010UrbanRural.cd <- Census2010UrbanRural %>% 
+  select(-State, -TotalHouseholds, -TotalRural, -TotalUrban)
+
+# Merge state data
+tweet.totals.official <- left_join(tweet.totals.official, Census2010UrbanRural.state, by="state.abb")
+
+# Merge CD data
+tweet.totals.official <- left_join(tweet.totals.official, Census2010UrbanRural.cd, by=c("state.abb","district"))
+
+# Get baseline tweet counts
+tweet.totals.official.baseline <- data.text.official.prepandemic.all %>% filter(date >= "2019-01-19" & date <= "2019-11-28") %>% 
+  group_by(state.abb, district) %>% 
+  dplyr::summarize(total.tweet.baseline=n())
+
+tweet.totals.official <- left_join(tweet.totals.official, tweet.totals.official.baseline, by=c("district", "state.abb"))
+
+# impute NYC COVID data
+missing_cds <- c(6,7,8,9,10,11,12,13,14,15)
+
+covid.NYC <- read.csv("Data/COVID_Indicator_Dataframes/covid_NYC.csv") %>%
+  select(date_of_interest, CASE_COUNT, DEATH_COUNT) %>%
+  rename(cd_incremental_cases = CASE_COUNT,
+         cd_incremental_deaths = DEATH_COUNT,
+         date=date_of_interest) %>%
+  # mutate(cd_incremental_cases =  cd_incremental_cases/length(missing_cds),       # divide evenly
+  #        cd_incremental_deaths = cd_incremental_deaths/length(missing_cds)) %>%  # amongst NYC reps
+  mutate(cd_incremental_cases =  cd_incremental_cases/length(missing_cds),       # assign each NYC member 
+         cd_incremental_deaths = cd_incremental_deaths/length(missing_cds)) %>%  # share of citywide indicators
+  mutate(date=as.Date(date, "%m/%d/%Y")) %>%
+  arrange(date) %>%
+  mutate(cd_cum_deaths = ave(cd_incremental_deaths, FUN=cumsum),
+         cd_cum_cases = ave(cd_incremental_cases, FUN=cumsum))  %>%
+  filter(date >= "2020-01-19" & date <= "2020-11-28")
+
+dist_col <- sort(rep(missing_cds, nrow(covid.NYC)))
+
+covid.NYC <- bind_rows(replicate(length(missing_cds), covid.NYC, simplify=F)) %>%
+  mutate(state.abb="NY", district=dist_col)
+
+
+
+# [UNFINISHED] More accurate method to get CD-level indicators
+
+# NYC.crosswalk <- read.csv("Data/COVID_Indicator_Dataframes/NYCcrosswalk.csv") %>% 
+#   full_join(read.csv("Data/COVID_Indicator_Dataframes/NY_block_population_census2010.csv"),
+#             by=c("block", "tract")) %>%
+#   mutate(block.population = as.numeric(
+#     str_remove(block.population, "\\(r[:digit:]{5}\\)"))) %>%  # remove coding
+#     filter(district %in% missing_cds)
+# 
+# NYC.crosswalk %>% group_by(district) %>% summarize(district.population = sum(block.population, na.rm=T), across()) %>% View()
+# 
+# # POP TOTALS NOT RIGHT
+# (NYC.crosswalk %>% group_by(district, boro) %>% summarize(cd.boro.population = sum(block.population, na.rm=T), across())) %>% select(district, boro, cd.boro.population) %>% 
+#   unique() %>% group_by(district) %>% 
+#   summarize(cd.population = sum(cd.boro.population, na.rm=T), across()) %>% 
+#   mutate(share.pop.boro.cd = round(cd.boro.population/cd.population,3)) %>% View()
+# 
+# 
+# covid.NYC <- read.csv("Data/COVID_Indicator_Dataframes/covid_NYC.csv")
+
+
+covid.CD <- read.csv("Data/COVID_Indicator_Dataframes/covid_cd.csv") %>% 
+  mutate(date=as.Date(date, "%Y-%m-%d")) %>% 
+  select(-StateName, -StateCode) %>% 
+  group_by(state.abb, district) %>% arrange(date, .by_group=T) %>% 
+  dplyr::mutate(cd_cum_cases = ave(cd_incremental_cases, state.abb, district, FUN=cumsum),
+                cd_cum_deaths = ave(cd_incremental_deaths, state.abb, district, FUN=cumsum)) %>%
+  filter(date >= "2020-01-19" & date <= "2020-11-28")
+
+covid.CD <- bind_rows(covid.CD, covid.NYC) %>% unique()
+
+
+covid.state <- read.csv("Data/COVID_Indicator_Dataframes/covid_state.csv") %>% 
+  mutate(date=as.Date(date, "%Y-%m-%d")) %>% 
+  group_by(state.abb) %>% arrange(date, .by_group=T) %>% 
+  dplyr::mutate(state_cum_cases = ave(state_incremental_cases, state.abb, FUN=cumsum),
+                state_cum_deaths = ave(state_incremental_deaths, state.abb, FUN=cumsum)) %>%
+  filter(date >= "2020-01-19" & date <= "2020-11-28") %>% 
+  group_by(state.abb) %>% arrange(date, .by_group=T)
+
+
+covid.national <- read.csv("Data/COVID_Indicator_Dataframes/covid_national.csv") %>% 
+  mutate(date=as.Date(date, "%Y-%m-%d")) %>% 
+  arrange(date) %>% 
+  dplyr::mutate(national_cum_cases = ave(national_incremental_cases, FUN=cumsum),
+                national_cum_deaths = ave(national_incremental_deaths, FUN=cumsum)) %>%
+  filter(date >= "2020-01-19" & date <= "2020-11-28")
+
+
+# Get total COVID deaths at CD, state, nat'l level
+
+totals.cd <- covid.CD %>% filter(date == "2020-11-28") %>% 
+  select(cd_cum_deaths, cd_cum_cases, state.abb, district)
+
+totals.state <- covid.state %>% filter(date == "2020-11-28") %>% 
+  select(state_cum_deaths, state_cum_cases, state.abb)
+
+totals.natl <- covid.national %>% filter(date == "2020-11-28") %>% 
+  select(national_cum_deaths, national_cum_cases)
+
+tweet.totals.official <- left_join(tweet.totals.official, 
+                                   totals.cd, 
+                                   by=c("state.abb", "district"))
+
+tweet.totals.official <- left_join(tweet.totals.official, totals.state, by=c("state.abb"))
+
+tweet.totals.official$natl.deaths =  totals.natl$national_cum_deaths
+
+tweet.totals.official$natl.cases =  totals.natl$national_cum_cases
+
+
+tweet.totals.official <- tweet.totals.official %>% 
+  rename(cd.deaths=cd_cum_deaths, cd.cases=cd_cum_cases,
+         state.deaths=state_cum_deaths, state.cases=state_cum_cases) %>% 
+  unique()
+
+
+# Add age-squared variables
+tweet.totals.official$age.squared <- (tweet.totals.official$age)^2
+tweet.totals.official$median.age.squared.cd <- (tweet.totals.official$median.age.cd)^2
+tweet.totals.official$median.age.squared.state <- (tweet.totals.official$median.age.state)^2
+
+# Setting Justin Amash party to 0
+tweet.totals.official$party[tweet.totals.official$name=="Justin Amash"] = 0
+
+# Creating AA or Latino dummy
+tweet.totals.official <- tweet.totals.official %>% mutate(aa.or.lat = case_when(
+  african.american==1 | latino==1 ~ 1,
+  TRUE ~ 0
+))
+
+temp <- read_excel("Data/Constituency_Factors/ballotpedia_governor_parties.xlsx") %>% 
+  mutate(state.abb=state.abb[which(state.name==state)]) %>% select(-state)
+
+tweet.totals.official <- tweet.totals.official %>% left_join(temp)
+rm(temp)
+
+# Convert state and cd deaths to hundreds of deaths for easier reading of regression coefficients
+tweet.totals.official$cd.deaths <- tweet.totals.official$cd.deaths/100
+tweet.totals.official$state.deaths <- tweet.totals.official$state.deaths/100
+
+```
+
+# Other
+Visualize distribution of tweet totals
+```{r}
+ggplot(data=tweet.totals.official, aes(x=total.covid.tweets)) +
+  geom_histogram(fill="orangered4", color="darkgray") +
+  labs(x="Total COVID Tweets",y="", title="Distribution of Total COVID Tweets") +
+  theme_bw()
+
+ggplot(data=tweet.totals.official, aes(x=total.tweets)) +
+  geom_histogram(fill="grey33", color="darkgray") +
+  labs(x="Total Tweets",y="", title="Distribution of Total Tweets") +
+  theme_bw()
+
+ggplot(data=tweet.totals.official, aes(x=tweet.share.covid)) +
+  geom_density(fill="purple4", color="black", alpha=0.75) +
+  labs(x="Share of Tweets about COVID",y="", title="Distribution of Share of Tweets about COVID") +
+  theme_bw()
+
+party_names <- list("100"="Democrats", "200"="Republicans")
+
+label_it <- function(variable,value){
+  return(party_names[value])
+}
+
+ggplot(data=tweet.totals.official %>% filter(party %in% 0:1) %>% 
+         mutate(party=recode(party, `1`="Democrats", `0`="Republicans")), 
+       aes(x=tweet.share.covid, fill=as.factor(party))) +
+  geom_density(color="black", alpha=0.75) +
+  labs(x="Share of Tweets about COVID",y="", title="Distribution of Share of Tweets about COVID by Party") +
+  theme_bw() +
+  facet_wrap(~party) +
+  scale_fill_manual(values=c("Democrats"="navyblue", "Republicans"="darkred")) +
+  theme(legend.position="none")
+
+ggplot(data=tweet.totals.official %>% drop_na(chamber), 
+       aes(x=tweet.share.covid, fill=as.factor(chamber))) +
+  geom_density(color="black", alpha=0.75) +
+  labs(x="Share of Tweets about COVID",y="", title="Distribution of Share of Tweets about COVID by Chamber") +
+  theme_bw() +
+  facet_wrap(~chamber) +
+  scale_fill_manual(values=c("House"="purple4", "Senate"="green4")) +
+  theme(legend.position="none")
+```
+
+Visualize distribution of COVID deaths
+```{r}
+ggplot(data=tweet.totals.official, aes(x=cd.deaths)) +
+  geom_histogram(fill="purple4", color="darkgray") +
+  labs(x="Total district COVID-19 deaths",y="", title="Distribution of Total District COVID-19 Deaths") +
+  theme_bw()
+
+ggplot(data=tweet.totals.official %>% select(state.abb, state.deaths) %>% filter(state.abb!="DC") %>% unique(), aes(x=state.deaths)) +
+  geom_histogram(fill="purple4", color="darkgray") +
+  labs(x="Total state COVID-19 deaths",y="", title="Distribution of Total State COVID-19 Deaths") +
+  theme_bw()
+
+
+ggplot(data=tweet.totals.official %>% select(state.abb, state.deaths, party) %>% 
+         filter(state.abb!="DC") %>% unique() %>% drop_na() %>%   
+         mutate(party=recode(party, `1`="Democrats", `0`="Republicans")), 
+       aes(x=state.deaths, fill=as.factor(party))) +
+  geom_histogram(color="black", alpha=0.75) +
+  labs(x="Total state COVID-19 deaths",y="", title="Distribution of Total State COVID-19 Deaths") +
+  theme_bw() +
+  facet_wrap(~party) +
+  scale_fill_manual(values=c("Democrats"="navyblue", "Republicans"="darkred")) +
+  theme(legend.position="none")
+
+party_names <- list("100"="Democrats", "200"="Republicans")
+
+label_it <- function(variable,value){
+  return(party_names[value])
+}
+
+
+ggplot(data=tweet.totals.official, aes(x=cd.deaths)) +
+  geom_density(fill="purple4", color="darkgray") +
+  labs(x="Total district COVID-19 deaths",y="", title="Distribution of Total District COVID-19 Deaths") +
+  theme_bw()
+
+ggplot(data=tweet.totals.official %>% filter(party %in% 0:1) %>% 
+         mutate(party=recode(party, `1`="Democrats", `0`="Republicans")), 
+       aes(x=cd.deaths, fill=as.factor(party))) +
+  geom_density(color="black", alpha=0.75) +
+  labs(x="Total district COVID-19 deaths",y="", title="Distribution of Total District COVID-19 Deaths") +
+  theme_bw() +
+  facet_wrap(~party) +
+  scale_fill_manual(values=c("Democrats"="navyblue", "Republicans"="darkred")) +
+  theme(legend.position="none")
+
+ggplot(data=tweet.totals.official %>% select(state.abb, state.deaths) %>% filter(state.abb!="DC") %>% unique(), aes(x=state.deaths)) +
+  geom_density(fill="purple4", color="darkgray") +
+  labs(x="Total state COVID-19 deaths",y="", title="Distribution of Total State COVID-19 Deaths") +
+  theme_bw()
+
+ggplot(data=tweet.totals.official %>% select(state.abb, state.deaths, party) %>% 
+         filter(state.abb!="DC") %>% unique() %>% drop_na() %>%   
+         mutate(party=recode(party, `1`="Democrats", `0`="Republicans")), 
+       aes(x=state.deaths, fill=as.factor(party))) +
+  geom_density(color="black", alpha=0.75) +
+  labs(x="Total state COVID-19 deaths",y="", title="Distribution of Total State COVID-19 Deaths") +
+  theme_bw() +
+  facet_wrap(~party) +
+  scale_fill_manual(values=c("Democrats"="navyblue", "Republicans"="darkred")) +
+  theme(legend.position="none")
+```
+
+Diagnostics
+
+INTERACTION PLOTS
+```{r}
+qplot(x = party, y = tweet.share.covid, 
+      data = tweet.totals.official %>% filter(chamber=="House") %>% drop_na(latino), 
+      color = as.factor(latino)) +
+  geom_smooth(method = "lm") +
+  xlim(c(-0.125,1.125)) +
+  theme_bw()
+
+plot_model(h3h4_lm_House, type = "pred", terms = c("african.american", "party")) + 
+  xlim(c(-0.1,1.1)) + 
+  ylim(c(0,1)) +
+  theme_bw()
+```
+
+
+SPEC CURVES
+
+Specification curve analysis code
+```{r}
+# CODE ADAPTED FROM GARETH NELLIS
+
+# all unique control combinations (i.e. powerset, including the empty set)
+# adapted from https://stackoverflow.com/questions/49570793/r-list-all-combinations-with-combn-multiple-m-values
+# control_list <- 
+#   data.frame(
+#     x = "sons",
+#     controls = 
+#       list(do.call("c", lapply(seq_along(controls), function(i) utils::combn(controls, i, FUN = list))) %>%
+#       map(function(x) paste(x, collapse = " + ")), "") %>%
+#       unlist())
+
+
+
+# estimation function
+spec_curve_ests <-
+  function(
+    x = NULL,
+    controls = NULL) {
+
+  if(controls == "") {plus <- ""} else {plus <- "+"}    
+  
+      frm <- 
+        as.formula(paste0("tweet.share.covid ~", x, plus, controls))
+
+      out <- 
+        #feols(frm, cluster = ~svy_sh_tsp_code, data = analysis_df) %>% 
+        lm(frm, data=tweet.totals.official) %>% 
+        tidy(conf.int = T) %>% 
+        mutate(control_set = as.character(controls))
+      
+    }  
+
+run_models <- function(IV=NULL, controls=NULL){
+  # all unique control combinations (i.e. powerset, including the empty set)
+  # adapted from:
+  # https://stackoverflow.com/questions/49570793/r-list-all-combinations-with-combn-multiple-m-values
+  control_list <- data.frame(
+    x = IV,
+    controls = list(
+      do.call("c", lapply(seq_along(controls), 
+                          function(i) utils::combn(controls, 
+                                                   i, FUN = list))) %>%
+      map(function(x) paste(x, collapse = " + ")), "") %>%
+      unlist())
+  
+  res <- pmap_dfr(control_list, .f = spec_curve_ests) %>% 
+    filter(term == IV) %>% 
+    arrange(estimate) %>%
+    mutate(specifications = 1:nrow(.))
+  
+  return(res)
+}
+```
+
+House model no interactions, cd.deaths as IV
+```{r}
+# declare controls      
+# h3h4_lm_House_controls_prim <- 
+#   c("age", "latino", "african.american", "last.vote.share", "pctUrban.cd",
+#     "median.age.cd", "pctEduc_Health_SocSvcs.cd", "race.share_hispanic.cd",
+#     "race.share_black.cd", "party:age", "party:latino", "party:african.american",
+#     "cd.deaths:last.vote.share", "cd.deaths:pctUrban.cd", "cd.deaths:median.age.cd",
+#     "cd.deaths:pctEduc_Health_SocSvcs.cd", "cd.deaths:race.share_hispanic.cd",
+#     "cd.deaths:race.share_black.cd", "pctUrban.cd:race.share_hispanic.cd",
+#     "pctUrban.cd:race.share_black.cd")
+h3h4_lm_House_controls <- 
+  c("party", "age", "latino", "african.american", "last.vote.share", "pctUrban.cd",
+    "median.age.cd", "pctEduc_Health_SocSvcs.cd", "race.share_hispanic.cd",
+    "race.share_black.cd", "pctUrban.cd", "median.age.cd")
+
+h3h4_House_spec <- run_models(IV="cd.deaths", controls=h3h4_lm_House_controls)
+
+# plot top panel  
+sc1 <-   
+  h3h4_House_spec %>%
+  ggplot(aes(x = specifications, y = estimate)) +
+    #geom_pointrange(size=0.25) +
+    geom_point(size=0.1) +
+    geom_ribbon(aes(ymin = conf.low, ymax = conf.high), fill="red", col="red", alpha=0.15) +
+    labs(x = "", y = "Estimate") +
+    geom_hline(yintercept = 0, color = "darkblue") +
+    ggtitle("") +
+    theme_bw()  
+
+# lower plot  
+sc2 <- 
+  expand.grid(control = h3h4_lm_House_controls, 
+              specifications = c(1:max(h3h4_House_spec$specifications))) %>% 
+  left_join(h3h4_House_spec, by = "specifications") %>% 
+  mutate(value = ifelse(str_detect(control_set, as.character(control)), "|", "")) %>% 
+  ggplot(aes(specifications, control)) +   
+    geom_text(aes(label = value)) +
+    scale_color_manual(values = c("lightblue")) +
+    labs(x = "Specification number", y = "") + 
+    theme_bw() +
+    theme(
+      axis.text.y=element_text(size=5.5) 
+    )
+
+grid.arrange(sc1, sc2)
+```
+
+House model salient interactions, cd.deaths as IV
+```{r}
+# declare controls      
+# h3h4_lm_House_controls_prim <- 
+#   c("age", "latino", "african.american", "last.vote.share", "pctUrban.cd",
+#     "median.age.cd", "pctEduc_Health_SocSvcs.cd", "race.share_hispanic.cd",
+#     "race.share_black.cd", "party:age", "party:latino", "party:african.american",
+#     "cd.deaths:last.vote.share", "cd.deaths:pctUrban.cd", "cd.deaths:median.age.cd",
+#     "cd.deaths:pctEduc_Health_SocSvcs.cd", "cd.deaths:race.share_hispanic.cd",
+#     "cd.deaths:race.share_black.cd", "pctUrban.cd:race.share_hispanic.cd",
+#     "pctUrban.cd:race.share_black.cd")
+h3h4_lm_House_controls2 <- 
+  c("state.deaths","party", "age", "age.squared", "latino", "african.american", "last.vote.share", "pctUrban.cd",
+    "median.age.cd", "median.age.squared.cd", "pctEduc_Health_SocSvcs.cd", "race.share_hispanic.cd",
+    "race.share_black.cd", "pctUrban.cd", "party:age",
+    "cd.deaths:pctUrban.cd")
+
+h3h4_House_spec <- run_models(IV="cd.deaths", controls=h3h4_lm_House_controls2)
+
+# plot top panel  
+sc3 <-   
+  h3h4_House_spec %>%
+  ggplot(aes(x = specifications, y = estimate)) +
+    #geom_pointrange(size=0.25) +
+    geom_point(size=0.1) +
+    geom_ribbon(aes(ymin = conf.low, ymax = conf.high), fill="red", col="red", alpha=0.15) +
+    labs(x = "", y = "District Deaths Coefficient Estimate", 
+         title="District Deaths Specification Curve Analysis") +
+    geom_hline(yintercept = 0, color = "darkblue") +
+    theme_bw() +
+    theme(
+      axis.title.y = element_text(size=7),
+      axis.text.y=element_text(size=7),
+      title = element_text(size=8)
+    )
+
+# lower plot  
+sc4 <- 
+  expand.grid(control = h3h4_lm_House_controls2, 
+              specifications = c(1:max(h3h4_House_spec$specifications))) %>% 
+  left_join(h3h4_House_spec, by = "specifications") %>% 
+  mutate(value = ifelse(str_detect(control_set, as.character(control)), "|", "")) %>% 
+  ggplot(aes(specifications, control)) +   
+    geom_text(aes(label = value), size=0.75) +
+    scale_color_manual(values = c("lightblue")) +
+    labs(x = "Specification number", y = "") + 
+    scale_y_discrete(labels=rev(c("District deaths*Share urban",
+                              "Is Democrat*Member age",
+                              "Share AA",
+                              "Share Hispanic",
+                              "Share in E,H,SS",
+                              "Median age",
+                              "Share urban",
+                              "Vote share won",
+                              "Is AA",
+                              "Is Latino",
+                              "Member age",
+                              "Is Democrat",
+                              "State deaths"))) +
+    theme_bw() + 
+    theme(
+        axis.text.y=element_text(size=5.5)
+      )  
+
+#grid.arrange(sc3, sc4)
+
+grid::grid.newpage()
+grid::grid.draw(rbind(ggplotGrob(sc3), ggplotGrob(sc4)))
+```
+House model table interactions, cd.deaths as IV TOO MANY MODELS TO RUN
+```{r}
+c("cd.deaths",
+"state.deaths",
+"party",
+"age",
+"african.american",
+"latino",
+"cd.deaths:party",
+"party:age",
+"party:latino",
+"party:african.american",
+"last.vote.share",
+"pctUrban.cd",
+"median.age.cd",
+"pctEduc_Health_SocSvcs.cd",
+"race.share_black.cd",
+"race.share_hispanic.cd",
+"cd.deaths:last.vote.share",
+"cd.deaths:median.age.cd",
+"cd.deaths:pctEduc_Health_SocSvcs.cd",
+"cd.deaths:pctUrban.cd",
+"cd.deaths:race.share_hispanic.cd",
+"cd.deaths:race.share_black.cd",
+"pctUrban.cd:race.share_hispanic.cd",
+"pctUrban.cd:race.share_black.cd")
+```
+
+
+House model salient interactions, party as IV
+```{r}
+# declare controls      
+# h3h4_lm_House_controls_prim <- 
+#   c("age", "latino", "african.american", "last.vote.share", "pctUrban.cd",
+#     "median.age.cd", "pctEduc_Health_SocSvcs.cd", "race.share_hispanic.cd",
+#     "race.share_black.cd", "party:age", "party:latino", "party:african.american",
+#     "cd.deaths:last.vote.share", "cd.deaths:pctUrban.cd", "cd.deaths:median.age.cd",
+#     "cd.deaths:pctEduc_Health_SocSvcs.cd", "cd.deaths:race.share_hispanic.cd",
+#     "cd.deaths:race.share_black.cd", "pctUrban.cd:race.share_hispanic.cd",
+#     "pctUrban.cd:race.share_black.cd")
+h3h4_lm_House_controls3 <- 
+  c("cd.deaths", "state.deaths", "age", "age.squared","latino", "african.american", "last.vote.share", "pctUrban.cd",
+    "median.age.cd", "pctEduc_Health_SocSvcs.cd", "race.share_hispanic.cd",
+    "race.share_black.cd", "pctUrban.cd", "median.age.cd", "party:age", "party:age.squared",
+    "cd.deaths:pctUrban.cd")
+
+h3h4_House_spec <- run_models(IV="party", controls=h3h4_lm_House_controls3)
+
+# plot top panel  
+sc5 <-   
+  h3h4_House_spec %>%
+  ggplot(aes(x = specifications, y = estimate)) +
+    #geom_pointrange(size=0.25) +
+    geom_point(size=0.1) +
+    geom_ribbon(aes(ymin = conf.low, ymax = conf.high), fill="red", col="red", alpha=0.15) +
+    labs(x = "", y = "Party Coefficient Estimate", 
+         title="Party Specification Curve Analysis") +
+    geom_hline(yintercept = 0, color = "darkblue") +
+    theme_bw() +
+    theme(
+      axis.title.y = element_text(size=7),
+      axis.text.y=element_text(size=7),
+      title = element_text(size=8)
+    )
+
+# lower plot  
+sc6 <- 
+  expand.grid(control = h3h4_lm_House_controls3, 
+              specifications = c(1:max(h3h4_House_spec$specifications))) %>% 
+  left_join(h3h4_House_spec, by = "specifications") %>% 
+  mutate(value = ifelse(str_detect(control_set, as.character(control)), "|", "")) %>% 
+  ggplot(aes(specifications, control)) +   
+    geom_text(aes(label = value), size=0.75) +
+    scale_color_manual(values = c("lightblue")) +
+    labs(x = "Specification number", y = "") +
+    scale_y_discrete(labels=rev(c("District deaths*Share urban",
+                                  "Is Democrat*Member age sq.",
+                                  "Is Democrat*Member age",
+                                  "Share AA",
+                                  "Share Hispanic",
+                                  "Share in E,H,SS",
+                                  "Median age",
+                                  "Share urban",
+                                  "Vote share won",
+                                  "Is AA",
+                                  "Is Latino",
+                                  "Member age squ.",
+                                  "Member age",
+                                  "State deaths",
+                                  "District deaths"))) +
+    theme_bw() + 
+  theme(
+      axis.text.y=element_text(size=5.5) 
+    )  
+
+grid::grid.newpage()
+grid::grid.draw(rbind(ggplotGrob(sc5), ggplotGrob(sc6)))
+```
+
+
+```{r}
+qplot(x = party, y = tweet.share.covid, 
+      data = tweet.totals.official %>% filter(chamber=="House") %>% drop_na(latino), 
+      color = as.factor(latino)) +
+  geom_smooth(method = "lm") +
+  xlim(c(-0.125,1.125)) +
+  theme_bw()
+
+ggplot(ggpredict(lm(tweet.share.covid ~ state.deaths + latino + african.american + state.deaths*(last.vote.share + pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state) + pctUrban.state*(race.share_hispanic.state + race.share_black.state),
+             data=tweet.totals.official %>% filter(chamber=="Senate", party==1)), terms="state.deaths"), aes(x, predicted)) +
+  geom_line(color="navyblue") +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = .1, fill="navyblue") +
+  theme_bw() +
+  labs(x="Total COVID-19 Deaths in State", y="Share of Tweets about COVID-19", title="Senate Democrats") +
+  ylim(c(0,0.5))
+
+ggplot(ggpredict(lm(tweet.share.covid ~ state.deaths + latino + african.american + state.deaths*(last.vote.share + pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state) + pctUrban.state*(race.share_hispanic.state + race.share_black.state),
+             data=tweet.totals.official %>% filter(chamber=="Senate", party==0)), terms="state.deaths"), aes(x, predicted)) +
+  geom_line(color="darkred") +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = .1, fill="darkred") +
+  theme_bw() +
+  labs(x="Total COVID-19 Deaths in State", y="Share of Tweets about COVID-19", title="Senate Republicans") +
+  ylim(c(0,0.5))
+
+
+
+ggplot(ggpredict(h3h4_lm_House, terms="cd.deaths"), aes(x, predicted)) +
+  geom_line(color="black") +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = .1, fill="darkred") +
+  theme_bw() +
+  labs(x="Total COVID-19 Deaths in District", y="Share of Tweets about COVID-19", title="Marginal Effect of District Deaths on Share of Tweets about COVID") +
+  ylim(c(0,0.5))
+
+ggplot(ggpredict(h3h4_lm_House, terms="party"), aes(x, predicted)) +
+  geom_point(color="black", size=2) +
+  #geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = .1, fill="darkred") +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width=0.05) +
+  theme_bw() +
+  labs(x="", y="Share of Tweets about COVID-19", title="Marginal Effect of Party on Share of Tweets about COVID") +
+  ylim(c(0.24,0.32)) +
+  scale_x_continuous(breaks=c(0,1), labels=c("House Republican", "House Democrat"), limits=c(-0.75,1.75))
+
+ggplot(ggpredict(h3h4_lm_House_Dem, terms="cd.deaths"), aes(x, predicted)) +
+  geom_line(color="black") +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = .1, fill="darkred") +
+  theme_bw() +
+  labs(x="Total COVID-19 Deaths in District", y="Share of Tweets about COVID-19", title="House") +
+  ylim(c(0,0.5))
+
+
+
+ggplot(tweet.totals.official, aes(sample = tweet.share.covid)) + 
+  stat_qq() + stat_qq_line() + theme_bw()
+```
+
+COEFFICIENT PLOTS
+```{r}
+plotify <- function(model){
+  retVal <- tidy(model, conf.int = TRUE) %>% 
+    filter(term != "(Intercept)")
+    return(retVal[,1:7])
+  }
+
+```
+
+
+# FOR WORKSHOP PRESENTATION 
+
+## HOUSE
+
+HOUSE SCATTER PLOTS
+```{r}
+ggplot(data=tweet.totals.official %>% filter(chamber=="Senate"), aes(x=state.deaths, y=tweet.share.covid, color=as.factor(party))) +
+  geom_point() +
+  labs(title="Senate") +
+  theme_bw()
+
+ggplot(data=tweet.totals.official %>% filter(chamber=="House"), aes(x=cd.deaths, y=tweet.share.covid, color=as.factor(party))) +
+  geom_point() +
+  labs(title="House") +
+  theme_bw()
+
+ggplot(data=tweet.totals.official %>% filter(chamber=="House", party==1), aes(x=cd.deaths, y=tweet.share.covid, color=as.factor(african.american))) +
+  geom_point() +
+  labs(title="House") +
+  theme_bw()
+
+ggplot(data=tweet.totals.official %>% filter(chamber=="House"), aes(x=state.deaths, y=tweet.share.covid, color=as.factor(party))) +
+  geom_point() +
+  labs(title="House") +
+  theme_bw()
+
+```
+
+HOUSE MEMBER FACTORS
+```{r}
+# HOUSE MEMBER FACTORS WITH ORIGINAL INTERACTIONS
+
+h3_lm_House_i <- lm(tweet.share.covid ~ cd.deaths + state.deaths + last.vote.share + party*(cd.deaths + age + age.squared + latino + african.american),
+             data=tweet.totals.official %>% filter(chamber=="House"))
+
+hm_estimates <- plotify(h3_lm_House_i)
+
+ggplot(hm_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "I House Tweet share on COVID Deaths and Member Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+
+# HOUSE MEMBER FACTORS NO INTERACTIONS
+
+h3_lm_House_ni <- lm(tweet.share.covid ~ cd.deaths + state.deaths + party + age + age.squared + latino + african.american + last.vote.share,
+             data=tweet.totals.official %>% filter(chamber=="House"))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_House, plotify)) %>% mutate(term=names(models))
+hm2_estimates <- plotify(h3_lm_House_ni)
+
+ggplot(hm2_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "NI House Tweet share on COVID Deaths and Member Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+# HOUSE DEMS MEMBER FACTORS NO INTERACTIONS
+
+h3_lm_HD_ni <- lm(tweet.share.covid ~ cd.deaths + state.deaths + age + age.squared + latino + african.american + last.vote.share,
+             data=tweet.totals.official %>% filter(chamber=="House", party==1))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_House, plotify)) %>% mutate(term=names(models))
+hm3_estimates <- plotify(h3_lm_HD_ni)
+
+ggplot(hm3_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "House Democrats Tweet share on COVID Deaths and Member Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+# HOUSE GOP MEMBER FACTORS NO INTERACTIONS
+
+h3_lm_HR_ni <- lm(tweet.share.covid ~ cd.deaths + state.deaths + age + age.squared + latino + african.american + last.vote.share,
+             data=tweet.totals.official %>% filter(chamber=="House", party==0))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_House, plotify)) %>% mutate(term=names(models))
+hm4_estimates <- plotify(h3_lm_HR_ni)
+
+ggplot(hm4_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "House Republicans Tweet share on COVID Deaths and Member Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+
+```
+
+HOUSE CONSTITUENCY FACTORS
+```{r}
+# HOUSE CONSTITUENCY FACTORS WITH INTERACTIONS
+h4_lm_House_i <- lm(tweet.share.covid ~ state.deaths + cd.deaths*(pctUrban.cd + median.age.cd + median.age.squared.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd),
+   data=tweet.totals.official %>% filter(chamber=="House"))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_House, plotify)) %>% mutate(term=names(models))
+hc_estimates <- plotify(h4_lm_House_i)
+
+ggplot(hc_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "I House Tweet share on COVID Deaths and Constituency Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+
+# HOUSE CONSTITUENCY FACTORS NO INTERACTIONS
+
+h4_lm_House_ni <- lm(tweet.share.covid ~ state.deaths + cd.deaths + pctUrban.cd + median.age.cd + median.age.squared.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd,
+   data=tweet.totals.official %>% filter(chamber=="House"))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_House, plotify)) %>% mutate(term=names(models))
+hc2_estimates <- plotify(h4_lm_House_ni)
+
+ggplot(hc2_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "NI House Tweet share on COVID Deaths and Constituency Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+# HOUSE DEMS CONSTITUENCY FACTORS NO INTERACTIONS
+
+h4_lm_HD_ni <- lm(tweet.share.covid ~ state.deaths + cd.deaths + pctUrban.cd + median.age.cd + median.age.squared.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd,
+             data=tweet.totals.official %>% filter(chamber=="House", party==1))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_House, plotify)) %>% mutate(term=names(models))
+hc3_estimates <- plotify(h4_lm_HD_ni)
+
+ggplot(hc3_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "NI House Democrats Tweet share on COVID Deaths and Constituency Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+# HOUSE GOP CONSTITUENCY FACTORS NO INTERACTIONS
+
+h4_lm_HR_ni <- lm(tweet.share.covid ~ state.deaths + cd.deaths + pctUrban.cd + median.age.cd + median.age.squared.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd,
+             data=tweet.totals.official %>% filter(chamber=="House", party==0))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_House, plotify)) %>% mutate(term=names(models))
+hc4_estimates <- plotify(h4_lm_HR_ni)
+
+ggplot(hc4_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "NI House Republicans Tweet share on COVID Deaths and Constituency Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+h4_lm_HD_i <- lm(tweet.share.covid ~ state.deaths + cd.deaths*(pctUrban.cd + median.age.cd + median.age.squared.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd),
+             data=tweet.totals.official %>% filter(chamber=="House", party==1))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_House, plotify)) %>% mutate(term=names(models))
+hc5_estimates <- plotify(h4_lm_HD_i)
+
+ggplot(hc5_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "I House Democrats Tweet share on COVID Deaths and Constituency Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+# HOUSE GOP CONSTITUENCY FACTORS NO INTERACTIONS
+
+h4_lm_HR_i <- lm(tweet.share.covid ~ state.deaths + cd.deaths*(pctUrban.cd + median.age.cd + median.age.squared.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd),
+             data=tweet.totals.official %>% filter(chamber=="House", party==0))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_House, plotify)) %>% mutate(term=names(models))
+hc6_estimates <- plotify(h4_lm_HR_i)
+
+ggplot(hc6_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "I House Republicans Tweet share on COVID Deaths and Constituency Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+```
+
+HOUSE MEMBER AND CONSTITUENCY FACTORS
+```{r}
+# HOUSE ALL FACTORS WITH INTERACTIONS
+
+h3h4_lm_House_i <- lm(tweet.share.covid ~ cd.deaths + state.deaths + party*(cd.deaths + age + age.squared + latino + african.american) + cd.deaths*(last.vote.share + pctUrban.cd + median.age.cd + median.age.squared.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd),
+             data=tweet.totals.official %>% filter(chamber=="House"))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_House, plotify)) %>% mutate(term=names(models))
+ha_estimates <- plotify(h3h4_lm_House_i)
+
+ggplot(ha_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "I House Tweet share on COVID Deaths and Member Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+
+# HOUSE ALL FACTORS NO INTERACTIONS
+
+h3h4_lm_House_ni <- lm(tweet.share.covid ~ cd.deaths + state.deaths + party + age + age.squared + latino + african.american + last.vote.share +  pctUrban.cd + median.age.cd + median.age.squared.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd,
+             data=tweet.totals.official %>% filter(chamber=="House"))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_House, plotify)) %>% mutate(term=names(models))
+ha2_estimates <- plotify(h3h4_lm_House_ni)
+
+ggplot(ha2_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "NI House Tweet share on COVID Deaths and All Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+# HOUSE DEMS MEMBER FACTORS NO INTERACTIONS
+
+h3h4_lm_HD_ni <- lm(tweet.share.covid ~ cd.deaths + state.deaths + age + age.squared + latino + african.american + last.vote.share + pctUrban.cd + median.age.cd + median.age.squared.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd,
+             data=tweet.totals.official %>% filter(chamber=="House", party==1))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_House, plotify)) %>% mutate(term=names(models))
+ha3_estimates <- plotify(h3h4_lm_HD_ni)
+
+ggplot(ha3_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "NI House Democrats Tweet share on COVID Deaths and All Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+# HOUSE GOP MEMBER FACTORS NO INTERACTIONS
+
+h3h4_lm_HR_ni <- lm(tweet.share.covid ~ cd.deaths + state.deaths + age + age.squared + latino + african.american + last.vote.share + pctUrban.cd + median.age.cd + median.age.squared.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd,
+             data=tweet.totals.official %>% filter(chamber=="House", party==0))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_House, plotify)) %>% mutate(term=names(models))
+ha4_estimates <- plotify(h3h4_lm_HR_ni)
+
+ggplot(ha4_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "NI House Republicans Tweet share on COVID Deaths and Member Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+
+# HOUSE DEMS MEMBER FACTORS INTERACTIONS
+
+h3h4_lm_HD_i <- lm(tweet.share.covid ~ cd.deaths + state.deaths + age + age.squared + latino + african.american + cd.deaths*(last.vote.share + pctUrban.cd + median.age.cd + median.age.squared.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd),
+             data=tweet.totals.official %>% filter(chamber=="House", party==1))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_House, plotify)) %>% mutate(term=names(models))
+ha3_estimates <- plotify(h3h4_lm_HD_i)
+
+ggplot(ha3_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "I House Democrats Tweet share on COVID Deaths and All Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+# HOUSE GOP MEMBER FACTORS INTERACTIONS
+
+h3h4_lm_HR_i <- lm(tweet.share.covid ~ cd.deaths + state.deaths + age + age.squared + latino + african.american + cd.deaths*(last.vote.share + pctUrban.cd + median.age.cd + median.age.squared.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd),
+             data=tweet.totals.official %>% filter(chamber=="House", party==0))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_House, plotify)) %>% mutate(term=names(models))
+ha4_estimates <- plotify(h3h4_lm_HR_i)
+
+ggplot(ha4_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "I House Republicans Tweet share on COVID Deaths and Member Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+```
+
+HOUSE COEF PLOT COMBINED
+```{r}
+
+house_plot_models <- list("All"=h3h4_lm_House_ni, "Democrats"=h3h4_lm_HD_ni, "Republicans"=h3h4_lm_HR_ni)
+
+house_estimates <- bind_rows(lapply(house_plot_models, plotify), .id="variable") %>% 
+  mutate(label=recode(term, "state.deaths"="State deaths",
+                                  "race.share_hispanic.cd"="Share Hispanic",
+                                  "race.share_black.cd"="Share\nAfrican-American",
+                                  "pctUrban.cd"="Share urban",
+                                  "pctEduc_Health_SocSvcs.cd"="Share employed\nin E,H,SS",
+                                  "median.age.squared.cd"="Median age sq.",
+                                  "median.age.cd"="Median age",
+                                  "latino"="Is Latino",
+                                  "last.vote.share"="Last vote share",
+                                  "cd.deaths"="District deaths",
+                                  "age.squared"="Member age sq.",
+                                  "age"="Member age ",
+                                  "african.american"="Is African-American",
+                                  "party"="Is Democrat"))
+
+# ggplot(house_estimates %>% filter(variable=="House"), aes(x=term, y=estimate))+
+#   geom_point(position = position_dodge(width = 1))+
+#   geom_hline(yintercept = 0, colour = "red", lty = 2) +
+#   geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2,
+#                   position = position_dodge(width = 1))+
+#   labs(title = "House Member and Constituency Factor Estimates", 
+#        y="Estimated effect on tweet share about COVID", x="") +
+#   scale_x_discrete(labels=c("State deaths",
+#                                   "Share Hispanic",
+#                                   "Share African-American",
+#                                   "Share urban",
+#                                   "Share employed in E,H,SS",
+#                                   "Is Democrat",
+#                                   "Median age",
+#                                   "Median age sq.",
+#                                   "Is member Latino",
+#                                   "Last vote share",
+#                                   "District deaths",
+#                                   "Is Latino",
+#                                   "Member age",
+#                                   "Member age sq.",
+#                                   "Is African-American")) +
+#   coord_flip() +
+#   theme_bw()
+# 
+# ggplot(house_estimates %>% filter(variable != "House"), aes(x=term, y=estimate, color=variable))+
+#   geom_hline(yintercept = 0, colour = "red", lty = 2) +
+#   geom_point(position = position_dodge(width = 0.4))+
+#   geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2,
+#                   position = position_dodge(width = 0.4)) +
+#   labs(title = "House Member and Constituency Factor Estimates by Party", 
+#        y="Estimated effect on tweet share about COVID", x="") +
+#   coord_flip() +
+#   # scale_x_discrete(labels=c("State deaths",
+#   #                                 "Share Hispanic",
+#   #                                 "Share African-American",
+#   #                                 "Share Urban",
+#   #                                 "Share Employed in E,H,SS",
+#   #                                 "Median age sq.",
+#   #                                 "Median age",
+#   #                                 "Is member Latino",
+#   #                                 "Last vote share",
+#   #                                 "District deaths",
+#   #                                 "Is Latino",
+#   #                                 "Member age sq.",
+#   #                                 "Member age ",
+#   #                                 "Is African-American")) +
+#   theme_bw() +
+#   theme(
+#     legend.title=element_blank()
+#   ) +
+#   scale_color_manual(values=c("House Dems"="dodgerblue3", "House GOP"="firebrick2"))
+
+ggplot(house_estimates, aes(x=label, y=estimate, color=variable))+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_point(position = position_dodge(width = 0.7), size=0.18)+
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=0.18,
+                  position = position_dodge(width = 0.7)) +
+  labs(title = "House Member and Constituency Factor Estimates", 
+       y="Estimated effect on tweet share about COVID", x="") +
+  coord_flip() +
+  # scale_x_discrete(labels=c("State deaths",
+  #                                 "Share Hispanic",
+  #                                 "Share African-American",
+  #                                 "Share Urban",
+  #                                 "Share Employed in E,H,SS",
+  #                                 "Median age",
+  #                                 "Median age sq.",
+  #                                 "Is member Latino",
+  #                                 "Last vote share",
+  #                                 "District deaths",
+  #                                 "Is Latino",
+  #                                 "Member age",
+  #                                 "Member age sq.",
+  #                                 "Is African-American")) +
+  theme_bw() +
+  theme(
+    legend.title=element_blank(),
+    legend.position=c(0.9, 0.87)
+  ) +
+  scale_color_manual(values=c("Democrats"="dodgerblue3", "Republicans"="firebrick2", "All"="black"))
+  
+```
+
+HOUSE REGRESSION TABLES
+```{r}
+modelsummary(list("Member factors"=h3_lm_House_ni,
+                  "Member factors (interactions)"=h3_lm_House_i,
+                  "Constituency factors"=h4_lm_House_ni,
+                  "Constituency factors (interactions)"=h4_lm_House_i,
+                  "All factors"=h3h4_lm_House_ni,
+                  "All factors (interactions)"=h3h4_lm_House_i), 
+             coef_omit="(Intercept)", 
+             gof_omit="AIC|BIC|Log.Lik.|F", estimate="{estimate} ({std.error}){stars}",
+             statistic=NULL, stars=c('+'=0.1,'*'=.05, '**'=.01, '***'=0.001),
+             title="Share of Tweets About COVID-19 (House)
+             &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; p-values: + = 0.1, * = 0.05, ** = 0.01, *** = 0.001", fmt = "%.0e",
+             coef_rename = c(
+               cd.deaths = "District COVID-19 deaths",
+               state.deaths = "State COVID-19 deaths",
+               party = "Is a Democrat",
+               age = "Member age",
+               age.squared = "Member age sq.",
+               african.american = "Is member African-American",
+               latino = "Is member Latino",
+               "cd.deaths:party" = "District deaths*Democrat",
+               "party:age" = "Democrat*Age",
+               "party:age.squared" = "Democrat*Age sq.",
+               "party:latino" = "Democrat*Member Latino",
+               "party:african.american" = "Democrat*Member African-American",
+               "last.vote.share" = "Last vote share",
+               "pctUrban.cd" = "Share of urban households in district",
+               "median.age.cd" = "Median age of district",
+               "median.age.squared.cd" = "Median age sq.",
+               "pctEduc_Health_SocSvcs.cd" = "Share of district employed in education, health, social services",
+               "race.share_black.cd" = "Share of district African-American",
+               "race.share_hispanic.cd" = "Share of district Hispanic",
+               "cd.deaths:last.vote.share" = "District deaths*Last vote share",
+               "cd.deaths:median.age.cd" = "District deaths*Median age",
+               "cd.deaths:median.age.squared.cd" = "District deaths*Median age sq.",
+               "cd.deaths:pctEduc_Health_SocSvcs.cd" = "District deaths*Share employed in E,H,SS",
+               "cd.deaths:pctUrban.cd" = "District deaths*Share urban",
+               "cd.deaths:race.share_hispanic.cd" = "District deaths*Share Hispanic",
+               "cd.deaths:race.share_black.cd" = "District deaths*Share African-American",
+               "pctUrban.cd:race.share_hispanic.cd" = "Share urban*Share Hispanic",
+               "pctUrban.cd:race.share_black.cd" = "Share urban*Share African-American"
+             )) %>% save_kable(file="Tables/CS_regressions/House_lm_all.png")
+
+modelsummary(list("Member factors"=h3_lm_HR_ni,
+                  "Constituency factors"=h4_lm_HR_ni,
+                  "Constituency factors (interactions)"=h4_lm_HR_i,
+                  "All factors"=h3h4_lm_HR_ni,
+                  "All factors (interactions)"=h3h4_lm_HR_i), 
+             coef_omit="(Intercept)", 
+             gof_omit="AIC|BIC|Log.Lik.|F", estimate="{estimate} ({std.error}){stars}",
+             statistic=NULL, stars=c('+'=0.1,'*'=.05, '**'=.01, '***'=0.001),
+             title="Share of Tweets About COVID-19 (House Republicans)
+             &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; p-values: + = 0.1, * = 0.05, ** = 0.01, *** = 0.001", fmt = "%.0e",
+             coef_rename = c(
+               cd.deaths = "District COVID-19 deaths",
+               state.deaths = "State COVID-19 deaths",
+               party = "Is a Democrat",
+               age = "Member age",
+               age.squared = "Member age sq.",
+               african.american = "Is member African-American",
+               latino = "Is member Latino",
+               "cd.deaths:party" = "District deaths*Democrat",
+               "party:age" = "Democrat*Age",
+               "party:age.squared" = "Democrat*Age sq.",
+               "party:latino" = "Democrat*Member Latino",
+               "party:african.american" = "Democrat*Member African-American",
+               "last.vote.share" = "Last vote share",
+               "pctUrban.cd" = "Share of urban households in district",
+               "median.age.cd" = "Median age of district",
+               "median.age.squared.cd" = "Median age sq.",
+               "pctEduc_Health_SocSvcs.cd" = "Share of district employed in education, health, social services",
+               "race.share_black.cd" = "Share of district African-American",
+               "race.share_hispanic.cd" = "Share of district Hispanic",
+               "cd.deaths:last.vote.share" = "District deaths*Last vote share",
+               "cd.deaths:median.age.cd" = "District deaths*Median age",
+               "cd.deaths:median.age.squared.cd" = "District deaths*Median age sq.",
+               "cd.deaths:pctEduc_Health_SocSvcs.cd" = "District deaths*Share employed in E,H,SS",
+               "cd.deaths:pctUrban.cd" = "District deaths*Share urban",
+               "cd.deaths:race.share_hispanic.cd" = "District deaths*Share Hispanic",
+               "cd.deaths:race.share_black.cd" = "District deaths*Share African-American",
+               "pctUrban.cd:race.share_hispanic.cd" = "Share urban*Share Hispanic",
+               "pctUrban.cd:race.share_black.cd" = "Share urban*Share African-American"
+             )) %>% save_kable(file="Tables/CS_regressions/House_R_lm_all.png")
+
+modelsummary(list("Member factors"=h3_lm_HD_ni,
+                  "Constituency factors"=h4_lm_HR_ni,
+                  "Constituency factors (interactions)"=h4_lm_HD_i,
+                  "All factors"=h3h4_lm_HD_ni,
+                  "All factors (interactions)"=h3h4_lm_HD_i), 
+             coef_omit="(Intercept)", 
+             gof_omit="AIC|BIC|Log.Lik.|F", estimate="{estimate} ({std.error}){stars}",
+             statistic=NULL, stars=c('+'=0.1,'*'=.05, '**'=.01, '***'=0.001),
+             title="Share of Tweets About COVID-19 (House Democrats)
+             &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; p-values: + = 0.1, * = 0.05, ** = 0.01, *** = 0.001", fmt = "%.0e",
+             coef_rename = c(
+               cd.deaths = "District COVID-19 deaths",
+               state.deaths = "State COVID-19 deaths",
+               party = "Is a Democrat",
+               age = "Member age",
+               age.squared = "Member age sq.",
+               african.american = "Is member African-American",
+               latino = "Is member Latino",
+               "cd.deaths:party" = "District deaths*Democrat",
+               "party:age" = "Democrat*Age",
+               "party:age.squared" = "Democrat*Age sq.",
+               "party:latino" = "Democrat*Member Latino",
+               "party:african.american" = "Democrat*Member African-American",
+               "last.vote.share" = "Last vote share",
+               "pctUrban.cd" = "Share of urban households in district",
+               "median.age.cd" = "Median age of district",
+               "median.age.squared.cd" = "Median age sq.",
+               "pctEduc_Health_SocSvcs.cd" = "Share of district employed in education, health, social services",
+               "race.share_black.cd" = "Share of district African-American",
+               "race.share_hispanic.cd" = "Share of district Hispanic",
+               "cd.deaths:last.vote.share" = "District deaths*Last vote share",
+               "cd.deaths:median.age.cd" = "District deaths*Median age",
+               "cd.deaths:median.age.squared.cd" = "District deaths*Median age sq.",
+               "cd.deaths:pctEduc_Health_SocSvcs.cd" = "District deaths*Share employed in E,H,SS",
+               "cd.deaths:pctUrban.cd" = "District deaths*Share urban",
+               "cd.deaths:race.share_hispanic.cd" = "District deaths*Share Hispanic",
+               "cd.deaths:race.share_black.cd" = "District deaths*Share African-American",
+               "pctUrban.cd:race.share_hispanic.cd" = "Share urban*Share Hispanic",
+               "pctUrban.cd:race.share_black.cd" = "Share urban*Share African-American"
+             )) %>% save_kable(file="Tables/CS_regressions/House_D_lm_all.png")
+
+```
+
+
+
+House Dems AA effect spec curve
+```{r}
+# estimation function
+spec_curve_ests2 <-
+  function(
+    x = NULL,
+    controls = NULL) {
+
+  if(controls == "") {plus <- ""} else {plus <- "+"}    
+  
+      frm <- 
+        as.formula(paste0("tweet.share.covid ~", x, plus, controls))
+
+      out <- 
+        #feols(frm, cluster = ~svy_sh_tsp_code, data = analysis_df) %>% 
+        lm(frm, data=tweet.totals.official %>% filter(party==1)) %>% 
+        tidy(conf.int = T) %>% 
+        mutate(control_set = as.character(controls))
+      
+    }  
+
+run_models2 <- function(IV=NULL, controls=NULL){
+  # all unique control combinations (i.e. powerset, including the empty set)
+  # adapted from:
+  # https://stackoverflow.com/questions/49570793/r-list-all-combinations-with-combn-multiple-m-values
+  control_list <- data.frame(
+    x = IV,
+    controls = list(
+      do.call("c", lapply(seq_along(controls), 
+                          function(i) utils::combn(controls, 
+                                                   i, FUN = list))) %>%
+      map(function(x) paste(x, collapse = " + ")), "") %>%
+      unlist())
+  
+  res <- pmap_dfr(control_list, .f = spec_curve_ests2) %>% 
+    filter(term == IV) %>% 
+    arrange(estimate) %>%
+    mutate(specifications = 1:nrow(.))
+  
+  return(res)
+}
+
+h3h4_lm_HD_controls <- 
+  c("state.deaths", "cd.deaths", "age", "age.squared", "latino", "last.vote.share", "pctUrban.cd",
+    "median.age.cd", "median.age.squared.cd", "pctEduc_Health_SocSvcs.cd", "race.share_hispanic.cd",
+    "race.share_black.cd", "pctUrban.cd", "cd.deaths:pctUrban.cd", "cd.deaths:african.american")
+
+h3h4_HD_AA_spec <- run_models2(IV="african.american", controls=h3h4_lm_HD_controls)
+
+# plot top panel  
+sc7 <-   
+  h3h4_HD_AA_spec %>%
+  ggplot(aes(x = specifications, y = estimate)) +
+    #geom_pointrange(size=0.25) +
+    geom_point(size=0.1) +
+    geom_ribbon(aes(ymin = conf.low, ymax = conf.high), fill="red", col=NA, alpha=0.15) +
+    labs(x = "", y = "Is Member AA Coefficient Estimate", 
+         title="Dem African-American Rep. Specification Curve Analysis") +
+    geom_hline(yintercept = 0, color = "darkblue") +
+    theme_bw() +
+    theme(
+      axis.title.y = element_text(size=7),
+      axis.text.y=element_text(size=7),
+      title = element_text(size=8)
+    )
+
+# lower plot  
+sc8 <- 
+  expand.grid(control = h3h4_lm_HD_controls, 
+              specifications = c(1:max(h3h4_HD_AA_spec$specifications))) %>% 
+  left_join(h3h4_HD_AA_spec, by = "specifications") %>% 
+  mutate(value = ifelse(str_detect(control_set, as.character(control)), "|", "")) %>% 
+  ggplot(aes(specifications, control)) +   
+    geom_text(aes(label = value), size=0.75) +
+    scale_color_manual(values = c("lightblue")) +
+    labs(x = "Specification number", y = "") + 
+    # scale_y_discrete(labels=rev(c("District deaths*Share urban",
+    #                           "Is Democrat*Member age",
+    #                           "Share AA",
+    #                           "Share Hispanic",
+    #                           "Share in E,H,SS",
+    #                           "Median age",
+    #                           "Share urban",
+    #                           "Vote share won",
+    #                           "Is AA",
+    #                           "Is Latino",
+    #                           "Member age",
+    #                           "Is Democrat",
+    #                           "State deaths"))) +
+    theme_bw() + 
+    theme(
+        axis.text.y=element_text(size=5.5)
+      )  
+
+#grid.arrange(sc3, sc4)
+
+grid::grid.newpage()
+grid::grid.draw(rbind(ggplotGrob(sc7), ggplotGrob(sc8)))
+```
+
+House tweet share dist by race
+```{r}
+
+# ggplot(data=tweet.totals.official %>%
+#          mutate(african.american=recode(african.american, `1`="African-American", `0`="Not African-American")) %>% 
+#          select(tweet.share.covid, african.american, party, chamber) %>%  drop_na() %>%  filter(chamber=="House"), 
+#        aes(x=tweet.share.covid, fill=as.factor(african.american))) +
+#   geom_density(color="black", alpha=0.75) +
+#   labs(x="Share of tweets about COVID-19",y="", title="House Both Parties") +
+#   theme_bw() +
+#   theme(
+#     legend.title = element_blank(),
+#     legend.position = c(0.85, 0.85)
+#   ) +
+#   scale_fill_manual(values=c("African-American"="cornflowerblue", "Not African-American"="limegreen"))
+# 
+# ggplot(data=tweet.totals.official %>%
+#          mutate(african.american=recode(african.american, `1`="African-American", `0`="Not African-American")) %>% 
+#          select(total.covid.tweets, african.american, party, chamber) %>%  drop_na() %>%  filter(chamber=="House", party==1), 
+#        aes(x=total.covid.tweets, fill=as.factor(african.american))) +
+#   geom_density(color="black", alpha=0.75) +
+#   labs(x="Total tweets about COVID-19",y="", title="House Democrats") +
+#   theme_bw() +
+#   theme(
+#     legend.title = element_blank(),
+#     legend.position = c(0.83, 0.88)
+#   ) +
+#   scale_fill_manual(values=c("African-American"="cornflowerblue", "Not African-American"="limegreen"))
+#   #facet_wrap(~party) +
+#   #scale_fill_manual(values=c("Democrats"="navyblue", "Republicans"="darkred")) +
+#   #theme(legend.position="none")
+# 
+# 
+# ggplot(data=tweet.totals.official %>%
+#          mutate(african.american=recode(african.american, `1`="African-American", `0`="Not African-American")) %>% 
+#          select(total.tweets, african.american, party, chamber) %>%  drop_na() %>%  filter(chamber=="House", party==1), 
+#        aes(x=total.tweets, fill=as.factor(african.american))) +
+#   geom_density(color="black", alpha=0.75) +
+#   labs(x="Total tweets",y="", title="House Democrats") +
+#   theme_bw() +
+#   theme(
+#     legend.title = element_blank(),
+#     legend.position = c(0.85, 0.85)
+#   ) +
+#   scale_fill_manual(values=c("African-American"="cornflowerblue", "Not African-American"="limegreen"))
+
+# POLISHED PLOTS
+
+twc_mean_D_AA <- mean((tweet.totals.official %>% filter(chamber=="House", party==1, african.american==1))$tweet.share.covid)
+
+twc_mean_D_nAA <- mean((tweet.totals.official %>% filter(chamber=="House", party==1, african.american==0))$tweet.share.covid)
+
+ggplot(data=tweet.totals.official %>%
+         mutate(african.american=recode(african.american, `1`="African-American", `0`="Not African-American")) %>% 
+         select(tweet.share.covid, african.american, party, chamber) %>%  
+         drop_na() %>%  filter(chamber=="House", party==1), 
+       aes(x=tweet.share.covid, fill=as.factor(african.american))) +
+  geom_density(color="black", alpha=0.75) +
+  geom_vline(xintercept=twc_mean_D_AA, color="navyblue", linetype="dashed", size=0.75) +
+  geom_vline(xintercept=twc_mean_D_nAA, color="darkgreen", linetype="dashed", size=0.75) +
+  labs(x="Share of tweets about COVID-19",y="", title="House Democrats Tweet Share Distribution by Race") +
+  theme_bw() +
+  theme(
+    legend.title = element_blank(),
+    legend.position = c(0.83, 0.88)
+  ) +
+  scale_fill_manual(values=c("African-American"="cornflowerblue", "Not African-American"="limegreen"), 
+                    labels=c(paste("African-American (μ = ", round(twc_mean_D_AA, 2), ")", sep=""), 
+                             paste("Not African-American (μ = ", round(twc_mean_D_nAA, 2), ")", sep="")))
+
+
+twc_mean_D_L <- mean((tweet.totals.official %>% filter(chamber=="House", party==1, latino==1))$tweet.share.covid)
+
+twc_mean_D_nL <- mean((tweet.totals.official %>% filter(chamber=="House", party==1, latino==0))$tweet.share.covid)
+
+ggplot(data=tweet.totals.official %>%
+         mutate(latino=recode(latino, `1`="Latino", `0`="Not Latino")) %>% 
+         select(tweet.share.covid, latino, party, chamber) %>%  
+         drop_na() %>%  filter(chamber=="House", party==1), 
+       aes(x=tweet.share.covid, fill=as.factor(latino))) +
+  geom_density(color="black", alpha=0.75) +
+  geom_vline(xintercept=twc_mean_D_L, color="navyblue", linetype="dashed", size=0.75) +
+  geom_vline(xintercept=twc_mean_D_nL, color="darkgreen", linetype="dashed", size=0.75) +
+  labs(x="Share of tweets about COVID-19",y="", title="House Democrats Tweet Share Distribution by Race") +
+  theme_bw() +
+  theme(
+    legend.title = element_blank(),
+    legend.position = c(0.83, 0.88)
+  ) +
+  scale_fill_manual(values=c("Latino"="cornflowerblue", "Not Latino"="limegreen"), 
+                    labels=c(paste("Latino (μ = ", round(twc_mean_D_L, 2), ")", sep=""), 
+                             paste("Not Latino (μ = ", round(twc_mean_D_nL, 2), ")", sep="")))
+
+twc_mean_R_L <- mean((tweet.totals.official %>% filter(chamber=="House", party==0, latino==1))$tweet.share.covid)
+
+twc_mean_R_nL <- mean((tweet.totals.official %>% filter(chamber=="House", party==0, latino==0))$tweet.share.covid)
+
+ggplot(data=tweet.totals.official %>%
+         mutate(latino=recode(latino, `1`="Latino", `0`="Not Latino")) %>% 
+         select(tweet.share.covid, latino, party, chamber) %>%  
+         drop_na() %>%  filter(chamber=="House", party==0), 
+       aes(x=tweet.share.covid, fill=as.factor(latino))) +
+  geom_density(color="black", alpha=0.75) +
+  geom_vline(xintercept=twc_mean_D_L, color="navyblue", linetype="dashed", size=0.75) +
+  geom_vline(xintercept=twc_mean_D_nL, color="darkgreen", linetype="dashed", size=0.75) +
+  labs(x="Share of tweets about COVID-19",y="", title="House Republicans Tweet Share Distribution by Race") +
+  theme_bw() +
+  theme(
+    legend.title = element_blank(),
+    legend.position = c(0.83, 0.88)
+  ) +
+  scale_fill_manual(values=c("Latino"="cornflowerblue", "Not Latino"="limegreen"), 
+                    labels=c(paste("Latino (μ = ", round(twc_mean_D_L, 2), ")", sep=""), 
+                             paste("Not Latino (μ = ", round(twc_mean_D_nL, 2), ")", sep="")))
+
+
+twc_mean_D_AAL <- mean((tweet.totals.official %>% filter(chamber=="House", party==1, aa.or.lat==1))$tweet.share.covid)
+
+twc_mean_D_nAAL <- mean((tweet.totals.official %>% filter(chamber=="House", party==1, aa.or.lat==0))$tweet.share.covid)
+
+ggplot(data=tweet.totals.official %>%
+         mutate(aa.or.lat=recode(aa.or.lat, `1`="AA or Latino", `0`="Not AA or Latino")) %>% 
+         select(tweet.share.covid, aa.or.lat, party, chamber) %>%  
+         drop_na() %>%  filter(chamber=="House", party==1), 
+       aes(x=tweet.share.covid, fill=as.factor(aa.or.lat))) +
+  geom_density(color="black", alpha=0.75) +
+  geom_vline(xintercept=twc_mean_D_AAL, color="navyblue", linetype="dashed", size=0.75) +
+  geom_vline(xintercept=twc_mean_D_nAAL, color="darkgreen", linetype="dashed", size=0.75) +
+  labs(x="Share of tweets about COVID-19",y="", title="House Democrats Tweet Share Distribution by Race") +
+  theme_bw() +
+  theme(
+    legend.title = element_blank(),
+    legend.position = c(0.83, 0.88)
+  ) +
+  scale_fill_manual(values=c("AA or Latino"="cornflowerblue", "Not AA or Latino"="limegreen"), 
+                    labels=c(paste("AA or Latino (μ = ", round(twc_mean_D_AAL, 2), ")", sep=""), 
+                             paste("Not AA or Latino (μ = ", round(twc_mean_D_nAAL, 2), ")", sep="")))
+
+twc_mean_AAL <- mean((tweet.totals.official %>% filter(chamber=="House", aa.or.lat==1))$tweet.share.covid)
+
+twc_mean_nAAL <- mean((tweet.totals.official %>% filter(chamber=="House", aa.or.lat==0))$tweet.share.covid)
+
+ggplot(data=tweet.totals.official %>%
+         mutate(aa.or.lat=recode(aa.or.lat, `1`="AA or Latino", `0`="Not AA or Latino")) %>% 
+         select(tweet.share.covid, aa.or.lat, party, chamber) %>%  
+         drop_na() %>%  filter(chamber=="House"), 
+       aes(x=tweet.share.covid, fill=as.factor(aa.or.lat))) +
+  geom_density(color="black", alpha=0.75) +
+  geom_vline(xintercept=twc_mean_D_AAL, color="navyblue", linetype="dashed", size=0.75) +
+  geom_vline(xintercept=twc_mean_D_nAAL, color="darkgreen", linetype="dashed", size=0.75) +
+  labs(x="Share of tweets about COVID-19",y="", title="House Tweet Share Distribution by Race") +
+  theme_bw() +
+  theme(
+    legend.title = element_blank(),
+    legend.position = c(0.83, 0.88)
+  ) +
+  scale_fill_manual(values=c("AA or Latino"="cornflowerblue", "Not AA or Latino"="limegreen"), 
+                    labels=c(paste("AA or Latino (μ = ", round(twc_mean_AAL, 2), ")", sep=""), 
+                             paste("Not AA or Latino (μ = ", round(twc_mean_nAAL, 2), ")", sep="")))
+
+```
+
+House tweet share dist by party
+```{r}
+twc_mean_HD <- mean((tweet.totals.official %>% filter(chamber=="House", party==1))$tweet.share.covid)
+
+twc_mean_HR <- mean((tweet.totals.official %>% filter(chamber=="House", party==0))$tweet.share.covid)
+
+ggplot(data=tweet.totals.official %>%
+         select(tweet.share.covid, party, chamber) %>%  
+         drop_na() %>%  filter(chamber=="House"), 
+       aes(x=tweet.share.covid, fill=as.factor(party))) +
+  geom_density(color="black", alpha=0.75) +
+  geom_vline(xintercept=twc_mean_HD, color="navyblue", linetype="dashed", size=0.75) +
+  geom_vline(xintercept=twc_mean_HR, color="darkred", linetype="dashed", size=0.75) +
+  labs(x="Share of tweets about COVID-19",y="", title="House Tweet Share Distribution by Party") +
+  theme_bw() +
+  theme(
+    legend.title = element_blank(),
+    legend.position = c(0.83, 0.88)
+  ) +
+  scale_fill_manual(values=c(`1`="dodgerblue3", `0`="red2"), 
+                    labels=c(paste("Democrats (μ = ", round(twc_mean_HD, 2), ")", sep=""), 
+                             paste("Republicans (μ = ", round(twc_mean_HR, 2), ")", sep="")))
+```
+
+House interaction plots
+```{r}
+# DEATHS AND VOTE SHARE
+fivenum((tweet.totals.official %>% filter(party==1, chamber=="House"))$last.vote.share)
+
+plot_model(h3h4_lm_HD_i, type="pred", 
+           terms=c("cd.deaths", "last.vote.share [49, 100]")) +
+  theme_bw() +
+  labs(x="Total district COVID-19 deaths", y="Share of tweets about COVID-19",
+       title="House Democrats Interaction Plot for Last Vote Share*District COVID-19 Deaths") +
+  theme(
+    legend.position = c(0.1, 0.85)
+  ) +
+  scale_color_manual("Last vote share",values = c(`49`="brown3", `100`="green4"),
+                    labels = c("49%", "100%")) +
+  scale_fill_manual(values = c(`49`="brown3", `100`="green4")) +
+  ylim(0,0.5)
+
+plot_model(h3h4_lm_HR_i, type="pred", 
+           terms=c("cd.deaths", "last.vote.share [49, 100]")) +
+  theme_bw() +
+  labs(x="Total district COVID-19 deaths", y="Share of tweets about COVID-19",
+       title="House Republicans Interaction Plot for Last Vote Share*District COVID-19 Deaths") +
+  theme(
+    legend.position = c(0.1, 0.85)
+  ) +
+  scale_color_manual("Last vote share",values = c(`49`="brown3", `100`="green4"),
+                    labels = c("49%", "100%")) +
+  scale_fill_manual(values = c(`49`="brown3", `100`="green4"))
+
+# DEATHS AND VOTE SHARE
+#fivenum((tweet.totals.official %>% filter(party==1, chamber=="House"))$last.vote.share)
+
+plot_model(h3h4_lm_House_i, type="pred", 
+           terms=c("cd.deaths", "last.vote.share [49, 100]")) +
+  theme_bw() +
+  labs(x="Total district COVID-19 deaths", y="Share of tweets about COVID-19",
+       title="House Interaction Plot for Last Vote Share*District COVID-19 Deaths") +
+  theme(
+    legend.position = c(0.1, 0.85)
+  ) +
+  scale_color_manual("Last vote share",values = c(`49`="brown3", `100`="green4"),
+                    labels = c("49%", "100%")) +
+  scale_fill_manual(values = c(`49`="brown3", `100`="green4"))
+
+
+ggplot(tweet.totals.official, aes(x=pctEduc_Health_SocSvcs.cd, y=cd.deaths)) +
+  geom_point()
+
+plot_model(lm(data=tweet.totals.official, cd.deaths ~ pctEduc_Health_SocSvcs.cd*pctUrban.cd), type="pred", 
+           terms=c("pctEduc_Health_SocSvcs.cd", "pctUrban.cd [0.25, 0.75, 1]")) +
+  theme_bw()
+
+
+
+plot_model(h4_lm_HD_ni, type="pred", 
+           terms=c("pctEduc_Health_SocSvcs.cd")) +
+  theme_bw() +
+  ylim(0,0.5)
+
+plot_model(h3h4_lm_HR_i, type="pred", 
+           terms=c("pctEduc_Health_SocSvcs.cd")) +
+  theme_bw() +
+  ylim(0,0.5)
+
+plot_model(h4_lm_House_ni, type="pred", 
+           terms=c("pctEduc_Health_SocSvcs.cd")) +
+  theme_bw() +
+  ylim(0,0.5)
+
+plot_model(h4_lm_House_i, type="pred", 
+           terms=c("pctEduc_Health_SocSvcs.cd")) +
+  theme_bw() +
+  ylim(0,0.5)
+
+
+```
+
+House marginal effect plots
+```{r}
+plot_model(h3_lm_House_i, type="pred", 
+           terms=c("cd.deaths")) +
+  theme_bw() +
+  labs(x="Total district COVID-19 deaths", y="Share of tweets about COVID-19",
+       title="House Marginal Effect of District COVID-19 Deaths on\nShare of Tweets about COVID-19 (Member Factors Model)")
+
+plot_model(h3h4_lm_House_i, type="pred", 
+           terms=c("last.vote.share")) +
+  theme_bw() +
+  labs(x="Last vote share (%)", y="Share of tweets about COVID-19",
+       title="House Marginal Effect of Last Vote Share on\nShare of Tweets about COVID-19") +
+  ylim(0,0.5)
+
+
+plot_model(h4_lm_HR_ni, type="pred", 
+           terms=c("pctEduc_Health_SocSvcs.cd")) +
+  theme_bw() +
+  labs(x="Share of district employed in education, health, social services",
+       y="Share of tweets about COVID-19", 
+       title="House Republicans Marginal Effect of Share Employed in E,H,SS on\nShare of Tweets about COVID-19 (Constituency Factors, No Interactions)") +
+  ylim(0,0.5)
+
+
+
+plot_model(h4_lm_House_ni, type="pred", 
+           terms=c("race.share_hispanic.cd")) +
+  theme_bw() +
+  labs(x="Share of district Hispanic",
+       y="Share of tweets about COVID-19", 
+       title="House Marginal Effect of Share of District Hispanic on\nShare of Tweets about COVID-19 (Constituency Factors, No Interactions)") +
+  ylim(0,0.5)
+```
+
+
+## Senate
+
+SENATE MEMBER FACTORS
+```{r}
+# SENATE MEMBER FACTORS WITH ORIGINAL INTERACTIONS
+
+h3_lm_Senate_i <- lm(tweet.share.covid ~ state.deaths + last.vote.share + party*(state.deaths + age + age.squared + latino + african.american),
+             data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+hm_estimates <- plotify(h3_lm_Senate_i)
+
+ggplot(hm_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "I Senate Tweet share on COVID Deaths and Member Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+
+# Senate MEMBER FACTORS NO INTERACTIONS
+
+h3_lm_Senate_ni <- lm(tweet.share.covid ~ state.deaths + party + age + age.squared + latino + african.american + last.vote.share,
+             data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_Senate, plotify)) %>% mutate(term=names(models))
+hm2_estimates <- plotify(h3_lm_Senate_ni)
+
+ggplot(hm2_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "NI Senate Tweet share on COVID Deaths and Member Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+# Senate DEMS MEMBER FACTORS NO INTERACTIONS
+
+h3_lm_SD_ni <- lm(tweet.share.covid ~ state.deaths + age + age.squared + latino + african.american + last.vote.share,
+             data=tweet.totals.official %>% filter(chamber=="Senate", party==1))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_Senate, plotify)) %>% mutate(term=names(models))
+hm3_estimates <- plotify(h3_lm_SD_ni)
+
+ggplot(hm3_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "Senate Democrats Tweet share on COVID Deaths and Member Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+# Senate GOP MEMBER FACTORS NO INTERACTIONS
+
+h3_lm_SR_ni <- lm(tweet.share.covid ~ state.deaths + state.deaths + age + age.squared + latino + african.american + last.vote.share,
+             data=tweet.totals.official %>% filter(chamber=="Senate", party==0))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_Senate, plotify)) %>% mutate(term=names(models))
+hm4_estimates <- plotify(h3_lm_SR_ni)
+
+ggplot(hm4_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "Senate Republicans Tweet share on COVID Deaths and Member Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+```
+
+SENATE CONSTITUENCY FACTORS
+```{r}
+# Senate CONSTITUENCY FACTORS WITH INTERACTIONS
+h4_lm_Senate_i <- lm(tweet.share.covid ~ state.deaths*(pctUrban.state + median.age.state + median.age.squared.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state),
+   data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_Senate, plotify)) %>% mutate(term=names(models))
+hc_estimates <- plotify(h4_lm_Senate_i)
+
+ggplot(hc_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "I Senate Tweet share on COVID Deaths and Constituency Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+
+# Senate CONSTITUENCY FACTORS NO INTERACTIONS
+
+h4_lm_Senate_ni <- lm(tweet.share.covid ~ state.deaths + pctUrban.state + median.age.state + median.age.squared.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state,
+   data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_Senate, plotify)) %>% mutate(term=names(models))
+hc2_estimates <- plotify(h4_lm_Senate_ni)
+
+ggplot(hc2_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "NI Senate Tweet share on COVID Deaths and Constituency Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+# Senate DEMS CONSTITUENCY FACTORS NO INTERACTIONS
+
+h4_lm_SD_ni <- lm(tweet.share.covid ~ state.deaths + pctUrban.state + median.age.state + median.age.squared.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state,
+             data=tweet.totals.official %>% filter(chamber=="Senate", party==1))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_Senate, plotify)) %>% mutate(term=names(models))
+hc3_estimates <- plotify(h4_lm_SD_ni)
+
+ggplot(hc3_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "NI Senate Democrats Tweet share on COVID Deaths and Constituency Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+# Senate GOP CONSTITUENCY FACTORS NO INTERACTIONS
+
+h4_lm_SR_ni <- lm(tweet.share.covid ~ state.deaths + pctUrban.state + median.age.state + median.age.squared.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state,
+             data=tweet.totals.official %>% filter(chamber=="Senate", party==0))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_Senate, plotify)) %>% mutate(term=names(models))
+hc4_estimates <- plotify(h4_lm_SR_ni)
+
+ggplot(hc4_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "NI Senate Republicans Tweet share on COVID Deaths and Constituency Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+h4_lm_SD_i <- lm(tweet.share.covid ~ state.deaths*(pctUrban.state + median.age.state + median.age.squared.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state),
+             data=tweet.totals.official %>% filter(chamber=="Senate", party==1))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_Senate, plotify)) %>% mutate(term=names(models))
+hc5_estimates <- plotify(h4_lm_SD_i)
+
+ggplot(hc5_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "I Senate Democrats Tweet share on COVID Deaths and Constituency Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+# Senate GOP CONSTITUENCY FACTORS NO INTERACTIONS
+
+h4_lm_SR_i <- lm(tweet.share.covid ~ state.deaths*(pctUrban.state + median.age.state + median.age.squared.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state),
+             data=tweet.totals.official %>% filter(chamber=="Senate", party==0))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_Senate, plotify)) %>% mutate(term=names(models))
+hc6_estimates <- plotify(h4_lm_SR_i)
+
+ggplot(hc6_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "I Senate Republicans Tweet share on COVID Deaths and Constituency Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+```
+
+SENATE MEMBER AND CONSTITUENCY FACTORS
+```{r}
+# Senate ALL FACTORS WITH INTERACTIONS
+
+h3h4_lm_Senate_i <- lm(tweet.share.covid ~ party*(state.deaths + age + age.squared + latino + african.american) + state.deaths*(last.vote.share + pctUrban.state + median.age.state + median.age.squared.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state),
+             data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_Senate, plotify)) %>% mutate(term=names(models))
+ha_estimates <- plotify(h3h4_lm_Senate_i)
+
+ggplot(ha_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "I Senate Tweet share on COVID Deaths and Member Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+
+# Senate ALL FACTORS NO INTERACTIONS
+
+h3h4_lm_Senate_ni <- lm(tweet.share.covid ~ state.deaths + party + age + age.squared + latino + african.american + last.vote.share +  pctUrban.state + median.age.state + median.age.squared.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state,
+             data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_Senate, plotify)) %>% mutate(term=names(models))
+ha2_estimates <- plotify(h3h4_lm_Senate_ni)
+
+ggplot(ha2_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "NI Senate Tweet share on COVID Deaths and All Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+# Senate DEMS MEMBER FACTORS NO INTERACTIONS
+
+h3h4_lm_SD_ni <- lm(tweet.share.covid ~ state.deaths + age + age.squared + latino + african.american + last.vote.share + pctUrban.state + median.age.state + median.age.squared.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state,
+             data=tweet.totals.official %>% filter(chamber=="Senate", party==1))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_Senate, plotify)) %>% mutate(term=names(models))
+ha3_estimates <- plotify(h3h4_lm_SD_ni)
+
+ggplot(ha3_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "NI Senate Democrats Tweet share on COVID Deaths and All Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+# Senate GOP MEMBER FACTORS NO INTERACTIONS
+
+h3h4_lm_SR_ni <- lm(tweet.share.covid ~ state.deaths + age + age.squared + latino + african.american + last.vote.share + pctUrban.state + median.age.state + median.age.squared.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state,
+             data=tweet.totals.official %>% filter(chamber=="Senate", party==0))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_Senate, plotify)) %>% mutate(term=names(models))
+ha4_estimates <- plotify(h3h4_lm_SR_ni)
+
+ggplot(ha4_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "NI Senate Republicans Tweet share on COVID Deaths and Member Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+
+# Senate DEMS MEMBER FACTORS INTERACTIONS
+
+h3h4_lm_SD_i <- lm(tweet.share.covid ~ age + age.squared + latino + african.american + state.deaths*(last.vote.share + pctUrban.state + median.age.state + median.age.squared.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state),
+             data=tweet.totals.official %>% filter(chamber=="Senate", party==1))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_Senate, plotify)) %>% mutate(term=names(models))
+ha3_estimates <- plotify(h3h4_lm_SD_i)
+
+ggplot(ha3_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "I Senate Democrats Tweet share on COVID Deaths and All Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+
+# Senate GOP MEMBER FACTORS INTERACTIONS
+
+h3h4_lm_SR_i <- lm(tweet.share.covid ~ age + age.squared + latino + african.american + state.deaths*(last.vote.share + pctUrban.state + median.age.state + median.age.squared.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state),
+             data=tweet.totals.official %>% filter(chamber=="Senate", party==0))
+
+#hm_estimates <- bind_rows(lapply(h3_lm_Senate, plotify)) %>% mutate(term=names(models))
+ha4_estimates <- plotify(h3h4_lm_SR_i)
+
+ggplot(ha4_estimates, aes(x=term, y=estimate))+
+  geom_point()+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=.2)+
+  labs(title = "I Senate Republicans Tweet share on COVID Deaths and Member Factors", y="Estimated effect on tweet share", x="") +
+  coord_flip() +
+  theme_bw()
+```
+
+All Senators state deaths spec curve
+```{r}
+h3h4_lm_Senate_controls <- 
+  c("party", "latino", "last.vote.share", "pctUrban.state",
+    "median.age.state", "median.age.squared.state", "pctEduc_Health_SocSvcs.state", "race.share_hispanic.state",
+    "race.share_black.state", "pctUrban.state", "state.deaths:pctUrban.state", "state.deaths:pctUrban.state", "state.deaths:african.american")
+
+h3h4_Senate_deaths_spec <- run_models(IV="state.deaths", controls=h3h4_lm_Senate_controls)
+
+# plot top panel  
+sc9 <-   
+  h3h4_Senate_deaths_spec %>%
+  ggplot(aes(x = specifications, y = estimate)) +
+    #geom_pointrange(size=0.25) +
+    geom_point(size=0.1) +
+    geom_ribbon(aes(ymin = conf.low, ymax = conf.high), fill="red", col=NA, alpha=0.15) +
+    labs(x = "", y = "Is Member AA Coefficient Estimate", 
+         title="Senate State Deaths Specification Curve Analysis") +
+    geom_hline(yintercept = 0, color = "darkblue") +
+    theme_bw() +
+    theme(
+      axis.title.y = element_text(size=7),
+      axis.text.y=element_text(size=7),
+      title = element_text(size=8)
+    )
+
+# lower plot  
+sc10 <- 
+  expand.grid(control = h3h4_lm_Senate_controls, 
+              specifications = c(1:max(h3h4_Senate_deaths_spec$specifications))) %>% 
+  left_join(h3h4_Senate_deaths_spec, by = "specifications") %>% 
+  mutate(value = ifelse(str_detect(control_set, as.character(control)), "|", "")) %>% 
+  ggplot(aes(specifications, control)) +   
+    geom_text(aes(label = value), size=0.75) +
+    scale_color_manual(values = c("lightblue")) +
+    labs(x = "Specification number", y = "") + 
+    # scale_y_discrete(labels=rev(c("District deaths*Share urban",
+    #                           "Is Democrat*Member age",
+    #                           "Share AA",
+    #                           "Share Hispanic",
+    #                           "Share in E,H,SS",
+    #                           "Median age",
+    #                           "Share urban",
+    #                           "Vote share won",
+    #                           "Is AA",
+    #                           "Is Latino",
+    #                           "Member age",
+    #                           "Is Democrat",
+    #                           "State deaths"))) +
+    theme_bw() + 
+    theme(
+        axis.text.y=element_text(size=5.5)
+      )  
+
+#grid.arrange(sc3, sc4)
+
+grid::grid.newpage()
+grid::grid.draw(rbind(ggplotGrob(sc9), ggplotGrob(sc10)))
+```
+
+GOP Senators state deaths spec curve
+```{r}
+h3h4_lm_SR_controls <- 
+  c("latino", "last.vote.share", "pctUrban.state", "age", "age.squared",
+    "median.age.state", "median.age.squared.state", "pctEduc_Health_SocSvcs.state", "race.share_hispanic.state",
+    "race.share_black.state", "pctUrban.state", "state.deaths:pctUrban.state", "state.deaths:pctUrban.state", "state.deaths:african.american")
+
+h3h4_SR_deaths_spec <- run_models(IV="state.deaths", controls=h3h4_lm_SR_controls)
+
+# plot top panel  
+sc11 <-   
+  h3h4_SR_deaths_spec %>%
+  ggplot(aes(x = specifications, y = estimate)) +
+    #geom_pointrange(size=0.25) +
+    geom_point(size=0.1) +
+    geom_ribbon(aes(ymin = conf.low, ymax = conf.high), fill="red", col=NA, alpha=0.15) +
+    labs(x = "", y = "Is Member AA Coefficient Estimate", 
+         title="Senate State Deaths Specification Curve Analysis") +
+    geom_hline(yintercept = 0, color = "darkblue") +
+    theme_bw() +
+    theme(
+      axis.title.y = element_text(size=7),
+      axis.text.y=element_text(size=7),
+      title = element_text(size=8)
+    )
+
+# lower plot  
+sc12 <- 
+  expand.grid(control = h3h4_lm_SR_controls, 
+              specifications = c(1:max(h3h4_SR_deaths_spec$specifications))) %>% 
+  left_join(h3h4_SR_deaths_spec, by = "specifications") %>% 
+  mutate(value = ifelse(str_detect(control_set, as.character(control)), "|", "")) %>% 
+  ggplot(aes(specifications, control)) +   
+    geom_text(aes(label = value), size=0.75) +
+    scale_color_manual(values = c("lightblue")) +
+    labs(x = "Specification number", y = "") + 
+    # scale_y_discrete(labels=rev(c("District deaths*Share urban",
+    #                           "Is Democrat*Member age",
+    #                           "Share AA",
+    #                           "Share Hispanic",
+    #                           "Share in E,H,SS",
+    #                           "Median age",
+    #                           "Share urban",
+    #                           "Vote share won",
+    #                           "Is AA",
+    #                           "Is Latino",
+    #                           "Member age",
+    #                           "Is Democrat",
+    #                           "State deaths"))) +
+    theme_bw() + 
+    theme(
+        axis.text.y=element_text(size=5.5)
+      )  
+
+#grid.arrange(sc3, sc4)
+
+grid::grid.newpage()
+grid::grid.draw(rbind(ggplotGrob(sc11), ggplotGrob(sc12)))
+```
+
+Dem Senators state age spec curve
+```{r}
+# estimation function
+spec_curve_ests2 <-
+  function(
+    x = NULL,
+    controls = NULL) {
+
+  if(controls == "") {plus <- ""} else {plus <- "+"}    
+  
+      frm <- 
+        as.formula(paste0("tweet.share.covid ~", x, plus, controls))
+
+      out <- 
+        #feols(frm, cluster = ~svy_sh_tsp_code, data = analysis_df) %>% 
+        lm(frm, data=tweet.totals.official %>% filter(party==1)) %>% 
+        tidy(conf.int = T) %>% 
+        mutate(control_set = as.character(controls))
+      
+    }  
+
+run_models2 <- function(IV=NULL, controls=NULL){
+  # all unique control combinations (i.e. powerset, including the empty set)
+  # adapted from:
+  # https://stackoverflow.com/questions/49570793/r-list-all-combinations-with-combn-multiple-m-values
+  control_list <- data.frame(
+    x = IV,
+    controls = list(
+      do.call("c", lapply(seq_along(controls), 
+                          function(i) utils::combn(controls, 
+                                                   i, FUN = list))) %>%
+      map(function(x) paste(x, collapse = " + ")), "") %>%
+      unlist())
+  
+  res <- pmap_dfr(control_list, .f = spec_curve_ests2) %>% 
+    filter(term == IV) %>% 
+    arrange(estimate) %>%
+    mutate(specifications = 1:nrow(.))
+  
+  return(res)
+}
+
+h3h4_lm_SD_controls <- 
+  c("state.deaths", "latino", "last.vote.share", "pctUrban.state", "age", "age.squared",
+    "median.age.state:state.deaths", "pctEduc_Health_SocSvcs.state", "race.share_hispanic.state",
+    "race.share_black.state", "pctUrban.state", "state.deaths:pctUrban.state", "state.deaths:pctUrban.state", "state.deaths:african.american")
+
+h3h4_SD_age_spec <- run_models2(IV="median.age.state", controls=h3h4_lm_SD_controls)
+
+# plot top panel  
+sc11 <-   
+  h3h4_SD_age_spec %>%
+  ggplot(aes(x = specifications, y = estimate)) +
+    #geom_pointrange(size=0.25) +
+    geom_point(size=0.1) +
+    geom_ribbon(aes(ymin = conf.low, ymax = conf.high), fill="red", col=NA, alpha=0.15) +
+    labs(x = "", y = "Is Member AA Coefficient Estimate", 
+         title="Senate State Deaths Specification Curve Analysis") +
+    geom_hline(yintercept = 0, color = "darkblue") +
+    theme_bw() +
+    theme(
+      axis.title.y = element_text(size=7),
+      axis.text.y=element_text(size=7),
+      title = element_text(size=8)
+    )
+
+# lower plot  
+sc12 <- 
+  expand.grid(control = h3h4_lm_SD_controls, 
+              specifications = c(1:max(h3h4_SD_age_spec$specifications))) %>% 
+  left_join(h3h4_SD_age_spec, by = "specifications") %>% 
+  mutate(value = ifelse(str_detect(control_set, as.character(control)), "|", "")) %>% 
+  ggplot(aes(specifications, control)) +   
+    geom_text(aes(label = value), size=0.75) +
+    scale_color_manual(values = c("lightblue")) +
+    labs(x = "Specification number", y = "") + 
+    # scale_y_discrete(labels=rev(c("District deaths*Share urban",
+    #                           "Is Democrat*Member age",
+    #                           "Share AA",
+    #                           "Share Hispanic",
+    #                           "Share in E,H,SS",
+    #                           "Median age",
+    #                           "Share urban",
+    #                           "Vote share won",
+    #                           "Is AA",
+    #                           "Is Latino",
+    #                           "Member age",
+    #                           "Is Democrat",
+    #                           "State deaths"))) +
+    theme_bw() + 
+    theme(
+        axis.text.y=element_text(size=5.5)
+      )  
+
+#grid.arrange(sc3, sc4)
+
+grid::grid.newpage()
+grid::grid.draw(rbind(ggplotGrob(sc11), ggplotGrob(sc12)))
+```
+
+SENATE COEF PLOT COMBINED
+```{r}
+senate_plot_models <- list("All"=h3h4_lm_Senate_ni, "Democrats"=h3h4_lm_SD_ni, "Republicans"=h3h4_lm_SR_ni)
+
+senate_estimates <- bind_rows(lapply(senate_plot_models, plotify), .id="variable") %>% 
+  mutate(label=recode(term, "state.deaths"="State deaths",
+                                  "race.share_hispanic.state"="Share Hispanic",
+                                  "race.share_black.state"="Share\nAfrican-American",
+                                  "pctUrban.state"="Share urban",
+                                  "pctEduc_Health_SocSvcs.state"="Share employed\nin E,H,SS",
+                                  "median.age.squared.state"="Median age sq.",
+                                  "median.age.state"="Median age",
+                                  "latino"="Is Latino",
+                                  "last.vote.share"="Last vote share",
+                                  "cd.deaths"="District deaths",
+                                  "age.squared"="Member age sq.",
+                                  "age"="Member age ",
+                                  "african.american"="Is African-American",
+                                  "party"="Is Democrat"))
+
+ggplot(senate_estimates, aes(x=label, y=estimate, color=variable))+
+  geom_hline(yintercept = 0, colour = "red", lty = 2) +
+  geom_point(position = position_dodge(width = 0.7), size=0.18)+
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), size=0.18,
+                  position = position_dodge(width = 0.7)) +
+  labs(title = "Senate Member and Constituency Factor Estimates", 
+       y="Estimated effect on tweet share about COVID", x="") +
+  coord_flip() +
+  # scale_x_discrete(labels=c("State deaths",
+  #                                 "Share Hispanic",
+  #                                 "Share African-American",
+  #                                 "Share Urban",
+  #                                 "Share Employed in E,H,SS",
+  #                                 "Median age",
+  #                                 "Median age sq.",
+  #                                 "Is member Latino",
+  #                                 "Last vote share",
+  #                                 "District deaths",
+  #                                 "Is Latino",
+  #                                 "Member age",
+  #                                 "Member age sq.",
+  #                                 "Is African-American")) +
+  theme_bw() +
+  theme(
+    legend.title=element_blank(),
+    legend.position=c(0.9, 0.87)
+  ) +
+  scale_color_manual(values=c("Democrats"="navyblue", "Republicans"="darkred", "All"="black"))
+```
+
+SENATE REGRESSION TABLES
+```{r}
+modelsummary(list("Member factors"=h3_lm_Senate_ni,
+                  "Member factors (interactions)"=h3_lm_Senate_i,
+                  "Constituency factors"=h4_lm_Senate_ni,
+                  "Constituency factors (interactions)"=h4_lm_Senate_i,
+                  "All factors"=h3h4_lm_Senate_ni,
+                  "All factors (interactions)"=h3h4_lm_Senate_i), 
+             coef_omit="(Intercept)", 
+             gof_omit="AIC|BIC|Log.Lik.|F", estimate="{estimate} ({std.error}){stars}",
+             statistic=NULL, stars=c('+'=0.1,'*'=.05, '**'=.01, '***'=0.001),
+             title="Share of Tweets About COVID-19 (Senate)
+             &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; p-values: + = 0.1, * = 0.05, ** = 0.01, *** = 0.001", fmt = "%.0e",
+             coef_rename = c(
+               state.deaths = "State COVID-19 deaths",
+               party = "Is a Democrat",
+               age = "Member age",
+               age.squared = "Member age sq.",
+               african.american = "Is member African-American",
+               latino = "Is member Latino",
+               "state.deaths:party" = "State deaths*Democrat",
+               "party:age" = "Democrat*Age",
+               "party:age.squared" = "Democrat*Age sq.",
+               "party:latino" = "Democrat*Member Latino",
+               "party:african.american" = "Democrat*Member African-American",
+               "last.vote.share" = "Last vote share",
+               "pctUrban.state" = "Share of urban households in state",
+               "median.age.state" = "Median age of state",
+               "median.age.squared.state" = "Median age sq.",
+               "pctEduc_Health_SocSvcs.state" = "Share of state employed in education, health, social services",
+               "race.share_black.state" = "Share of state African-American",
+               "race.share_hispanic.state" = "Share of state Hispanic",
+               "state.deaths:last.vote.share" = "State deaths*Last vote share",
+               "state.deaths:median.age.state" = "State deaths*Median age",
+               "state.deaths:median.age.squared.state" = "State deaths*Median age sq.",
+               "state.deaths:pctEduc_Health_SocSvcs.state" = "State deaths*Share employed in E,H,SS",
+               "state.deaths:pctUrban.state" = "State deaths*Share urban",
+               "state.deaths:race.share_hispanic.state" = "State deaths*Share Hispanic",
+               "state.deaths:race.share_black.state" = "State deaths*Share African-American",
+               "pctUrban.state:race.share_hispanic.state" = "Share urban*Share Hispanic",
+               "pctUrban.state:race.share_black.state" = "Share urban*Share African-American"
+             )) %>% save_kable(file="Tables/CS_regressions/Senate_lm_all.png")
+
+modelsummary(list("Member factors"=h3_lm_SR_ni,
+                  "Constituency factors"=h4_lm_SR_ni,
+                  "Constituency factors (interactions)"=h4_lm_SR_i,
+                  "All factors"=h3h4_lm_SR_ni,
+                  "All factors (interactions)"=h3h4_lm_SR_i), 
+             coef_omit="(Intercept)", 
+             gof_omit="AIC|BIC|Log.Lik.|F", estimate="{estimate} ({std.error}){stars}",
+             statistic=NULL, stars=c('+'=0.1,'*'=.05, '**'=.01, '***'=0.001),
+             title="Share of Tweets About COVID-19 (Senate Republicans)
+             &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; p-values: + = 0.1, * = 0.05, ** = 0.01, *** = 0.001", fmt = "%.0e",
+             coef_rename = c(
+                             state.deaths = "State COVID-19 deaths",
+               party = "Is a Democrat",
+               age = "Member age",
+               age.squared = "Member age sq.",
+               african.american = "Is member African-American",
+               latino = "Is member Latino",
+               "state.deaths:party" = "State deaths*Democrat",
+               "party:age" = "Democrat*Age",
+               "party:age.squared" = "Democrat*Age sq.",
+               "party:latino" = "Democrat*Member Latino",
+               "party:african.american" = "Democrat*Member African-American",
+               "last.vote.share" = "Last vote share",
+               "pctUrban.state" = "Share of urban households in state",
+               "median.age.state" = "Median age of state",
+               "median.age.squared.state" = "Median age sq.",
+               "pctEduc_Health_SocSvcs.state" = "Share of state employed in education, health, social services",
+               "race.share_black.state" = "Share of state African-American",
+               "race.share_hispanic.state" = "Share of state Hispanic",
+               "state.deaths:last.vote.share" = "State deaths*Last vote share",
+               "state.deaths:median.age.state" = "State deaths*Median age",
+               "state.deaths:median.age.squared.state" = "State deaths*Median age sq.",
+               "state.deaths:pctEduc_Health_SocSvcs.state" = "State deaths*Share employed in E,H,SS",
+               "state.deaths:pctUrban.state" = "State deaths*Share urban",
+               "state.deaths:race.share_hispanic.state" = "State deaths*Share Hispanic",
+               "state.deaths:race.share_black.state" = "State deaths*Share African-American",
+               "pctUrban.state:race.share_hispanic.state" = "Share urban*Share Hispanic",
+               "pctUrban.state:race.share_black.state" = "Share urban*Share African-American"
+             )) %>% save_kable(file="Tables/CS_regressions/Senate_R_lm_all.png")
+
+modelsummary(list("Member factors"=h3_lm_SD_ni,
+                  "Constituency factors"=h4_lm_SR_ni,
+                  "Constituency factors (interactions)"=h4_lm_SD_i,
+                  "All factors"=h3h4_lm_SD_ni,
+                  "All factors (interactions)"=h3h4_lm_SD_i), 
+             coef_omit="(Intercept)", 
+             gof_omit="AIC|BIC|Log.Lik.|F", estimate="{estimate} ({std.error}){stars}",
+             statistic=NULL, stars=c('+'=0.1,'*'=.05, '**'=.01, '***'=0.001),
+             title="Share of Tweets About COVID-19 (Senate Democrats)
+             &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; p-values: + = 0.1, * = 0.05, ** = 0.01, *** = 0.001", fmt = "%.0e",
+             coef_rename = c(
+                state.deaths = "State COVID-19 deaths",
+               party = "Is a Democrat",
+               age = "Member age",
+               age.squared = "Member age sq.",
+               african.american = "Is member African-American",
+               latino = "Is member Latino",
+               "state.deaths:party" = "State deaths*Democrat",
+               "party:age" = "Democrat*Age",
+               "party:age.squared" = "Democrat*Age sq.",
+               "party:latino" = "Democrat*Member Latino",
+               "party:african.american" = "Democrat*Member African-American",
+               "last.vote.share" = "Last vote share",
+               "pctUrban.state" = "Share of urban households in state",
+               "median.age.state" = "Median age of state",
+               "median.age.squared.state" = "Median age sq.",
+               "pctEduc_Health_SocSvcs.state" = "Share of state employed in education, health, social services",
+               "race.share_black.state" = "Share of state African-American",
+               "race.share_hispanic.state" = "Share of state Hispanic",
+               "state.deaths:last.vote.share" = "State deaths*Last vote share",
+               "state.deaths:median.age.state" = "State deaths*Median age",
+               "state.deaths:median.age.squared.state" = "State deaths*Median age sq.",
+               "state.deaths:pctEduc_Health_SocSvcs.state" = "State deaths*Share employed in E,H,SS",
+               "state.deaths:pctUrban.state" = "State deaths*Share urban",
+               "state.deaths:race.share_hispanic.state" = "State deaths*Share Hispanic",
+               "state.deaths:race.share_black.state" = "State deaths*Share African-American",
+               "pctUrban.state:race.share_hispanic.state" = "Share urban*Share Hispanic",
+               "pctUrban.state:race.share_black.state" = "Share urban*Share African-American"
+             )) %>% save_kable(file="Tables/CS_regressions/Senate_D_lm_all.png")
+
+```
+
+Senate tweet share dist by party
+```{r}
+twc_mean_SD <- mean((tweet.totals.official %>% filter(chamber=="Senate", party==1))$tweet.share.covid)
+
+twc_mean_SR <- mean((tweet.totals.official %>% filter(chamber=="Senate", party==0))$tweet.share.covid)
+
+ggplot(data=tweet.totals.official %>%
+         select(tweet.share.covid, party, chamber) %>%  
+         drop_na() %>%  filter(chamber=="Senate"), 
+       aes(x=tweet.share.covid, fill=as.factor(party))) +
+  geom_density(color="black", alpha=0.75) +
+  geom_vline(xintercept=twc_mean_SD, color="navyblue", linetype="dashed", size=0.75) +
+  geom_vline(xintercept=twc_mean_SR, color="darkred", linetype="dashed", size=0.75) +
+  labs(x="Share of tweets about COVID-19",y="", title="Senate Tweet Share Distribution by Party") +
+  theme_bw() +
+  theme(
+    legend.title = element_blank(),
+    legend.position = c(0.83, 0.88)
+  ) +
+  scale_fill_manual(values=c(`1`="dodgerblue3", `0`="red2"), 
+                    labels=c(paste("Democrats (μ = ", round(twc_mean_HD, 2), ")", sep=""), 
+                             paste("Republicans (μ = ", round(twc_mean_HR, 2), ")", sep="")))
+```
+
+SENATE MARGINAL EFFECTS
+```{r}
+plot_model(h3h4_lm_SD_i, type="pred", 
+           terms=c("pctEduc_Health_SocSvcs.state")) +
+  theme_bw() +
+  labs(x="Share of district employed in education, health, social services",
+       y="Share of tweets about COVID-19", 
+       title="Senate Democrats Marginal Effect of Share Employed in E,H,SS on\nShare of Tweets about COVID-19 (All Factors)") +
+  ylim(-0.1,1) +
+  xlim(min(tweet.totals.official$pctEduc_Health_SocSvcs.state),
+       max(tweet.totals.official$pctEduc_Health_SocSvcs.state))
+
+plot_model(h3h4_lm_SD_i, type="pred", 
+           terms=c("median.age.state")) +
+  theme_bw() +
+  labs(x="Median age of state",
+       y="Share of tweets about COVID-19", 
+       title="Senate Democrats Marginal Effect Median Age of State on\nShare of Tweets about COVID-19 (All Factors)")
+
+hist(tweet.totals.official$median.age.state)
+hist(tweet.totals.official$pctEduc_Health_SocSvcs.state)
+```
+
+
+
+
+# FOR PAPER
+
+## DV: COVID TWEET SHARE
+
+House (All)
+```{r}
+# Member factors
+
+h3Hni <- lm(100*tweet.share.covid ~ cd.deaths + state.deaths + last.vote.share + party + age + latino + african.american,
+             data=tweet.totals.official %>% filter(chamber=="House"))
+
+h3Hi <- lm(100*tweet.share.covid ~ cd.deaths*(last.vote.share + party + age + latino + african.american) + state.deaths*(last.vote.share + party + age + latino + african.american) ,
+             data=tweet.totals.official %>% filter(chamber=="House"))
+
+# Constituency factors
+
+h4Hni <- lm(100*tweet.share.covid ~ state.deaths + cd.deaths + pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd,
+   data=tweet.totals.official %>% filter(chamber=="House"))
+
+
+h4Hi <- lm(100*tweet.share.covid ~ cd.deaths*(pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd) + state.deaths*(pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd),
+   data=tweet.totals.official %>% filter(chamber=="House"))
+
+# All factors
+
+h3h4Hni <- lm(100*tweet.share.covid ~ cd.deaths + state.deaths + party + age + latino + african.american + last.vote.share +  pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd,
+             data=tweet.totals.official %>% filter(chamber=="House"))
+
+h3h4Hi <- lm(100*tweet.share.covid ~ cd.deaths*(party + age + latino + african.american + last.vote.share + pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd) + state.deaths*(party + age + latino + african.american + last.vote.share + pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd),
+             data=tweet.totals.official %>% filter(chamber=="House"))
+
+# Regression table
+
+modelsummary(list("Member factors"=h3Hni,
+                  "Member factors (interactions)"=h3Hi,
+                  "Constituency factors"=h4Hni,
+                  "Constituency factors (interactions)"=h4Hi,
+                  "All factors"=h3h4Hni,
+                  "All factors (interactions)"=h3h4Hi), 
+             coef_omit="(Intercept)", 
+             gof_omit="AIC|BIC|Log.Lik.|F", estimate="{estimate} ({std.error}){stars}",
+             statistic=NULL, stars=c('+'=0.1,'*'=.05, '**'=.01, '***'=0.001),
+             title="p-values: + = 0.1, * = 0.05, ** = 0.01, *** = 0.001", fmt = 3,
+             coef_rename = c(
+               cd.deaths = "District COVID-19 deaths (hundreds)",
+               state.deaths = "State COVID-19 deaths (hundreds)",
+               party = "Is a Democrat",
+               age = "Member age",
+               african.american = "Is member African-American",
+               latino = "Is member Latino",
+               "cd.deaths:party" = "District deaths*Democrat",
+               "party:age" = "Democrat*member age",
+               "party:latino" = "Democrat*member Latino",
+               "party:african.american" = "Democrat*member AA",
+               "last.vote.share" = "Last vote share",
+               "pctUrban.cd" = "Share of households urban",
+               "median.age.cd" = "Median age of district",
+               "median.age.squared.cd" = "Median age sq.",
+               "pctEduc_Health_SocSvcs.cd" = "Share employed in E,H,SS",
+               "race.share_black.cd" = "Share of district AA",
+               "race.share_hispanic.cd" = "Share of district Hispanic",
+               "cd.deaths:last.vote.share" = "District deaths*last vote share",
+               "cd.deaths:median.age.cd" = "District deaths*median age",
+               "cd.deaths:median.age.squared.cd" = "District deaths*median age sq.",
+               "cd.deaths:pctEduc_Health_SocSvcs.cd" = "District deaths*share employed in E,H,SS",
+               "cd.deaths:pctUrban.cd" = "District deaths*Share urban",
+               "cd.deaths:race.share_hispanic.cd" = "District deaths*share Hispanic",
+               "cd.deaths:race.share_black.cd" = "District deaths*share AA",
+               "pctUrban.cd:race.share_hispanic.cd" = "Share urban*share Hispanic",
+               "pctUrban.cd:race.share_black.cd" = "Share urban*share AA",
+               "cd.deaths:age" = "District deaths*member age",
+               "cd.deaths:latino" = "District deaths*member Latino",
+               "cd.deaths:african.american" = "District deaths*member AA",
+               "last.vote.share:state.deaths" = "State deaths*last vote share",
+               "party:state.deaths" = "State deaths*Democrat",
+               "age:state.deaths" = "State deaths*member age",
+               "latino:state.deaths" = "State deaths*member Latino",
+               "african.american:state.deaths" = "State deaths*member AA",
+               "pctEduc_Health_SocSvcs.cd:state.deaths"="State deaths*share employed in E,H,SS",
+               "pctUrban.cd:state.deaths"="State deaths*share urban",
+               "median.age.cd:state.deaths"="State deaths*median age",
+               "race.share_hispanic.cd:state.deaths"="State deaths*share Hispanic",
+               "race.share_black.cd:state.deaths"="State deaths*share African-American"
+             )) %>% save_kable(file="Tables/CS_regressions/ForPaper/House_lm.png")
+```
+
+House (Dems)
+```{r}
+# Member factors
+
+h3HDni <- lm(100*tweet.share.covid ~ cd.deaths + state.deaths + last.vote.share + age + latino + african.american,
+             data=tweet.totals.official %>% filter(chamber=="House", party==1))
+
+h3HDi <- lm(100*tweet.share.covid ~ cd.deaths*(last.vote.share + age + latino + african.american) + state.deaths*(last.vote.share + age + latino + african.american) ,
+             data=tweet.totals.official %>% filter(chamber=="House", party==1))
+
+# Constituency factors
+
+h4HDni <- lm(100*tweet.share.covid ~ state.deaths + cd.deaths + pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd,
+   data=tweet.totals.official %>% filter(chamber=="House", party==1))
+
+
+h4HDi <- lm(100*tweet.share.covid ~ cd.deaths*(pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd) + state.deaths*(pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd),
+   data=tweet.totals.official %>% filter(chamber=="House", party==1))
+
+# All factors
+
+h3h4HDni <- lm(100*tweet.share.covid ~ cd.deaths + state.deaths + age + latino + african.american + last.vote.share +  pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd,
+             data=tweet.totals.official %>% filter(chamber=="House", party==1))
+
+h3h4HDi <- lm(100*tweet.share.covid ~ cd.deaths*(age + latino + african.american + last.vote.share + pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd) + state.deaths*(age + latino + african.american + last.vote.share + pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd),
+             data=tweet.totals.official %>% filter(chamber=="House", party==1))
+
+# Regression table
+
+modelsummary(list("Member factors"=h3HDni,
+                  "Member factors (interactions)"=h3HDi,
+                  "Constituency factors"=h4HDni,
+                  "Constituency factors (interactions)"=h4HDi,
+                  "All factors"=h3h4HDni,
+                  "All factors (interactions)"=h3h4HDi), 
+             coef_omit="(Intercept)", 
+             gof_omit="AIC|BIC|Log.Lik.|F", estimate="{estimate} ({std.error}){stars}",
+             statistic=NULL, stars=c('+'=0.1,'*'=.05, '**'=.01, '***'=0.001),
+             title="p-values: + = 0.1, * = 0.05, ** = 0.01, *** = 0.001", fmt = 3,
+             coef_rename = c(
+               cd.deaths = "District COVID-19 deaths (hundreds)",
+               state.deaths = "State COVID-19 deaths (hundreds)",
+               party = "Is a Democrat",
+               age = "Member age",
+               african.american = "Is member African-American",
+               latino = "Is member Latino",
+               "cd.deaths:party" = "District deaths*Democrat",
+               "party:age" = "Democrat*member age",
+               "party:latino" = "Democrat*member Latino",
+               "party:african.american" = "Democrat*member AA",
+               "last.vote.share" = "Last vote share",
+               "pctUrban.cd" = "Share of households urban",
+               "median.age.cd" = "Median age of district",
+               "median.age.squared.cd" = "Median age sq.",
+               "pctEduc_Health_SocSvcs.cd" = "Share employed in E,H,SS",
+               "race.share_black.cd" = "Share of district AA",
+               "race.share_hispanic.cd" = "Share of district Hispanic",
+               "cd.deaths:last.vote.share" = "District deaths*last vote share",
+               "cd.deaths:median.age.cd" = "District deaths*median age",
+               "cd.deaths:median.age.squared.cd" = "District deaths*median age sq.",
+               "cd.deaths:pctEduc_Health_SocSvcs.cd" = "District deaths*share employed in E,H,SS",
+               "cd.deaths:pctUrban.cd" = "District deaths*Share urban",
+               "cd.deaths:race.share_hispanic.cd" = "District deaths*share Hispanic",
+               "cd.deaths:race.share_black.cd" = "District deaths*share AA",
+               "pctUrban.cd:race.share_hispanic.cd" = "Share urban*share Hispanic",
+               "pctUrban.cd:race.share_black.cd" = "Share urban*share AA",
+               "cd.deaths:age" = "District deaths*member age",
+               "cd.deaths:latino" = "District deaths*member Latino",
+               "cd.deaths:african.american" = "District deaths*member AA",
+               "last.vote.share:state.deaths" = "State deaths*last vote share",
+               "party:state.deaths" = "State deaths*Democrat",
+               "age:state.deaths" = "State deaths*member age",
+               "latino:state.deaths" = "State deaths*member Latino",
+               "african.american:state.deaths" = "State deaths*member AA",
+               "pctEduc_Health_SocSvcs.cd:state.deaths"="State deaths*share employed in E,H,SS",
+               "pctUrban.cd:state.deaths"="State deaths*share urban",
+               "median.age.cd:state.deaths"="State deaths*median age",               
+               "race.share_hispanic.cd:state.deaths"="State deaths*share Hispanic",
+               "race.share_black.cd:state.deaths"="State deaths*share African-American"
+             )) %>% save_kable(file="Tables/CS_regressions/ForPaper/HouseDems_lm.png")
+```
+
+House (GOP)
+```{r}
+# Member factors
+
+h3HRni <- lm(100*tweet.share.covid ~ cd.deaths + state.deaths + last.vote.share + age + latino + african.american,
+             data=tweet.totals.official %>% filter(chamber=="House", party==0))
+
+h3HRi <- lm(100*tweet.share.covid ~ cd.deaths*(last.vote.share + age + latino + african.american) + state.deaths*(last.vote.share + age + latino + african.american) ,
+             data=tweet.totals.official %>% filter(chamber=="House", party==0))
+
+# Constituency factors
+
+h4HRni <- lm(100*tweet.share.covid ~ state.deaths + cd.deaths + pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd,
+   data=tweet.totals.official %>% filter(chamber=="House", party==0, party==0))
+
+
+h4HRi <- lm(100*tweet.share.covid ~  + cd.deaths*(pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd) + state.deaths*(pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd),
+   data=tweet.totals.official %>% filter(chamber=="House", party==0))
+
+# All factors
+
+h3h4HRni <- lm(100*tweet.share.covid ~ cd.deaths + state.deaths + age + latino + african.american + last.vote.share +  pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd,
+             data=tweet.totals.official %>% filter(chamber=="House", party==0))
+
+h3h4HRi <- lm(100*tweet.share.covid ~ cd.deaths*(age + latino + african.american + last.vote.share + pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd) + state.deaths*(age + latino + african.american + last.vote.share + pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd),
+             data=tweet.totals.official %>% filter(chamber=="House", party==0))
+
+# Regression table
+
+modelsummary(list("Member factors"=h3HRni,
+                  "Member factors (interactions)"=h3HRi,
+                  "Constituency factors"=h4HRni,
+                  "Constituency factors (interactions)"=h4HRi,
+                  "All factors"=h3h4HRni,
+                  "All factors (interactions)"=h3h4HRi), 
+             coef_omit="(Intercept)", 
+             gof_omit="AIC|BIC|Log.Lik.|F", estimate="{estimate} ({std.error}){stars}",
+             statistic=NULL, stars=c('+'=0.1,'*'=.05, '**'=.01, '***'=0.001),
+             title="p-values: + = 0.1, * = 0.05, ** = 0.01, *** = 0.001", fmt = 3,
+             coef_rename = c(
+               cd.deaths = "District COVID-19 deaths (hundreds)",
+               state.deaths = "State COVID-19 deaths (hundreds)",
+               party = "Is a Democrat",
+               age = "Member age",
+               african.american = "Is member African-American",
+               latino = "Is member Latino",
+               "cd.deaths:party" = "District deaths*Democrat",
+               "party:age" = "Democrat*member age",
+               "party:latino" = "Democrat*member Latino",
+               "party:african.american" = "Democrat*member AA",
+               "last.vote.share" = "Last vote share",
+               "pctUrban.cd" = "Share of households urban",
+               "median.age.cd" = "Median age of district",
+               "median.age.squared.cd" = "Median age sq.",
+               "pctEduc_Health_SocSvcs.cd" = "Share employed in E,H,SS",
+               "race.share_black.cd" = "Share of district AA",
+               "race.share_hispanic.cd" = "Share of district Hispanic",
+               "cd.deaths:last.vote.share" = "District deaths*last vote share",
+               "cd.deaths:median.age.cd" = "District deaths*median age",
+               "cd.deaths:median.age.squared.cd" = "District deaths*median age sq.",
+               "cd.deaths:pctEduc_Health_SocSvcs.cd" = "District deaths*share employed in E,H,SS",
+               "cd.deaths:pctUrban.cd" = "District deaths*Share urban",
+               "cd.deaths:race.share_hispanic.cd" = "District deaths*share Hispanic",
+               "cd.deaths:race.share_black.cd" = "District deaths*share AA",
+               "pctUrban.cd:race.share_hispanic.cd" = "Share urban*share Hispanic",
+               "pctUrban.cd:race.share_black.cd" = "Share urban*share AA",
+               "cd.deaths:age" = "District deaths*member age",
+               "cd.deaths:latino" = "District deaths*member Latino",
+               "cd.deaths:african.american" = "District deaths*member AA",
+               "last.vote.share:state.deaths" = "State deaths*last vote share",
+               "party:state.deaths" = "State deaths*Democrat",
+               "age:state.deaths" = "State deaths*member age",
+               "latino:state.deaths" = "State deaths*member Latino",
+               "african.american:state.deaths" = "State deaths*member AA",
+               "pctEduc_Health_SocSvcs.cd:state.deaths"="State deaths*share employed in E,H,SS",
+               "pctUrban.cd:state.deaths"="State deaths*share urban",
+               "median.age.cd:state.deaths"="State deaths*median age",
+               "race.share_hispanic.cd:state.deaths"="State deaths*share Hispanic",
+               "race.share_black.cd:state.deaths"="State deaths*share African-American"
+             )) %>% save_kable(file="Tables/CS_regressions/ForPaper/HouseGOP_lm.png")
+```
+
+
+Senate (All)
+```{r}
+# Member factors
+
+h3Sni <- lm(100*tweet.share.covid ~ state.deaths + last.vote.share + party + age + latino + african.american,
+             data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+h3Si <- lm(100*tweet.share.covid ~ state.deaths*(last.vote.share + party + age + latino + african.american) ,
+             data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+# Constituency factors
+
+h4Sni <- lm(100*tweet.share.covid ~ state.deaths + pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state,
+   data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+
+h4Si <- lm(100*tweet.share.covid ~ state.deaths*(pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state),
+   data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+# All factors
+
+h3h4Sni <- lm(100*tweet.share.covid ~ state.deaths + party + age + latino + african.american + last.vote.share +  pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state,
+             data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+h3h4Si <- lm(100*tweet.share.covid ~ state.deaths*(party + age + latino + african.american + last.vote.share + pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state),
+             data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+# Regression table
+
+modelsummary(list("Member factors"=h3Sni,
+                  "Member factors (interactions)"=h3Si,
+                  "Constituency factors"=h4Sni,
+                  "Constituency factors (interactions)"=h4Si,
+                  "All factors"=h3h4Sni,
+                  "All factors (interactions)"=h3h4Si), 
+             coef_omit="(Intercept)", 
+             gof_omit="AIC|BIC|Log.Lik.|F", estimate="{estimate} ({std.error}){stars}",
+             statistic=NULL, stars=c('+'=0.1,'*'=.05, '**'=.01, '***'=0.001),
+             title="p-values: + = 0.1, * = 0.05, ** = 0.01, *** = 0.001", fmt = 3,
+             coef_rename = c(
+               state.deaths = "State COVID-19 deaths (hundreds)",
+               party = "Is a Democrat",
+               age = "Member age",
+               african.american = "Is member African-American",
+               latino = "Is member Latino",
+               "party:age" = "Democrat*member age",
+               "party:latino" = "Democrat*member Latino",
+               "party:african.american" = "Democrat*member AA",
+               "last.vote.share" = "Last vote share",
+               "pctUrban.state" = "Share of households urban",
+               "median.age.state" = "Median age of state",
+               "median.age.squared.state" = "Median age sq.",
+               "pctEduc_Health_SocSvcs.state" = "Share employed in E,H,SS",
+               "race.share_black.state" = "Share of state AA",
+               "race.share_hispanic.state" = "Share of state Hispanic",
+               "pctUrban.state:race.share_hispanic.state" = "Share urban*share Hispanic",
+               "pctUrban.state:race.share_black.state" = "Share urban*share AA",
+               "state.deaths:last.vote.share" = "State deaths*last vote share",
+               "state.deaths:party" = "State deaths*Democrat",
+               "state.deaths:age" = "State deaths*member age",
+               "state.deaths:latino" = "State deaths*member Latino",
+               "state.deaths:african.american" = "State deaths*member AA",
+               "state.deaths:pctEduc_Health_SocSvcs.state"="State deaths*share employed in E,H,SS",
+               "state.deaths:race.share_hispanic.state"="State deaths*share Hispanic",
+               "state.deaths:race.share_black.state"="State deaths*share African-American",
+               "state.deaths:pctUrban.state"="State deaths*share urban",
+               "state.deaths:median.age.state"="State deaths*median age"
+             )) %>% save_kable(file="Tables/CS_regressions/ForPaper/Senate_lm.png")
+```
+
+Senate (Dems)
+```{r}
+# Member factors
+
+h3SDni <- lm(100*tweet.share.covid ~ state.deaths + last.vote.share + age + latino + african.american,
+             data=tweet.totals.official %>% filter(chamber=="Senate", party==1))
+
+h3SDi <- lm(100*tweet.share.covid ~ state.deaths*(last.vote.share + age + latino + african.american) ,
+             data=tweet.totals.official %>% filter(chamber=="Senate", party==1))
+
+# Constituency factors
+
+h4SDni <- lm(100*tweet.share.covid ~ state.deaths + pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state,
+   data=tweet.totals.official %>% filter(chamber=="Senate", party==1))
+
+
+h4SDi <- lm(100*tweet.share.covid ~ state.deaths*(pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state),
+   data=tweet.totals.official %>% filter(chamber=="Senate", party==1))
+
+# All factors
+
+h3h4SDni <- lm(100*tweet.share.covid ~ state.deaths + age + latino + african.american + last.vote.share +  pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state,
+             data=tweet.totals.official %>% filter(chamber=="Senate", party==1))
+
+h3h4SDi <- lm(100*tweet.share.covid ~ state.deaths*(age + latino + african.american + last.vote.share + pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state),
+             data=tweet.totals.official %>% filter(chamber=="Senate", party==1))
+
+# Regression table
+
+modelsummary(list("Member factors"=h3SDni,
+                  "Member factors (interactions)"=h3SDi,
+                  "Constituency factors"=h4SDni,
+                  "Constituency factors (interactions)"=h4SDi,
+                  "All factors"=h3h4SDni,
+                  "All factors (interactions)"=h3h4SDi), 
+             coef_omit="(Intercept)", 
+             gof_omit="AIC|BIC|Log.Lik.|F", estimate="{estimate} ({std.error}){stars}",
+             statistic=NULL, stars=c('+'=0.1,'*'=.05, '**'=.01, '***'=0.001),
+             title="p-values: + = 0.1, * = 0.05, ** = 0.01, *** = 0.001", fmt = 3,
+             coef_rename = c(
+               state.deaths = "State COVID-19 deaths (hundreds)",
+               party = "Is a Democrat",
+               age = "Member age",
+               african.american = "Is member African-American",
+               latino = "Is member Latino",
+               "party:age" = "Democrat*member age",
+               "party:latino" = "Democrat*member Latino",
+               "party:african.american" = "Democrat*member AA",
+               "last.vote.share" = "Last vote share",
+               "pctUrban.state" = "Share of households urban",
+               "median.age.state" = "Median age of state",
+               "median.age.squared.state" = "Median age sq.",
+               "pctEduc_Health_SocSvcs.state" = "Share employed in E,H,SS",
+               "race.share_black.state" = "Share of state AA",
+               "race.share_hispanic.state" = "Share of state Hispanic",
+               "pctUrban.state:race.share_hispanic.state" = "Share urban*share Hispanic",
+               "pctUrban.state:race.share_black.state" = "Share urban*share AA",
+               "state.deaths:last.vote.share" = "State deaths*last vote share",
+               "state.deaths:party" = "State deaths*Democrat",
+               "state.deaths:age" = "State deaths*member age",
+               "state.deaths:latino" = "State deaths*member Latino",
+               "state.deaths:african.american" = "State deaths*member AA",
+               "state.deaths:pctEduc_Health_SocSvcs.state"="State deaths*share employed in E,H,SS",
+               "state.deaths:race.share_hispanic.state"="State deaths*share Hispanic",
+               "state.deaths:race.share_black.state"="State deaths*share African-American",
+               "state.deaths:pctUrban.state"="State deaths*share urban",
+               "state.deaths:median.age.state"="State deaths*median age"
+             )) %>% save_kable(file="Tables/CS_regressions/ForPaper/SenateDems_lm.png")
+```
+
+Senate (GOP)
+```{r}
+# Member factors
+
+h3SRni <- lm(100*tweet.share.covid ~ state.deaths + last.vote.share + age + latino + african.american,
+             data=tweet.totals.official %>% filter(chamber=="Senate", party==0))
+
+h3SRi <- lm(100*tweet.share.covid ~ state.deaths*(last.vote.share + age + latino + african.american) ,
+             data=tweet.totals.official %>% filter(chamber=="Senate", party==0))
+
+# Constituency factors
+
+h4SRni <- lm(100*tweet.share.covid ~ state.deaths + pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state,
+   data=tweet.totals.official %>% filter(chamber=="Senate", party==0))
+
+
+h4SRi <- lm(100*tweet.share.covid ~ state.deaths*(pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state),
+   data=tweet.totals.official %>% filter(chamber=="Senate", party==0))
+
+# All factors
+
+h3h4SRni <- lm(100*tweet.share.covid ~ state.deaths + age + latino + african.american + last.vote.share +  pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state,
+             data=tweet.totals.official %>% filter(chamber=="Senate", party==0))
+
+h3h4SRi <- lm(100*tweet.share.covid ~ state.deaths*(age + latino + african.american + last.vote.share + pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state),
+             data=tweet.totals.official %>% filter(chamber=="Senate", party==0))
+
+# Regression table
+
+modelsummary(list("Member factors"=h3SRni,
+                  "Member factors (interactions)"=h3SRi,
+                  "Constituency factors"=h4SRni,
+                  "Constituency factors (interactions)"=h4SRi,
+                  "All factors"=h3h4SRni,
+                  "All factors (interactions)"=h3h4SRi), 
+             coef_omit="(Intercept)", 
+             gof_omit="AIC|BIC|Log.Lik.|F", estimate="{estimate} ({std.error}){stars}",
+             statistic=NULL, stars=c('+'=0.1,'*'=.05, '**'=.01, '***'=0.001),
+             title="p-values: + = 0.1, * = 0.05, ** = 0.01, *** = 0.001", fmt = 3,
+             coef_rename = c(
+               state.deaths = "State COVID-19 deaths (hundreds)",
+               party = "Is a Democrat",
+               age = "Member age",
+               african.american = "Is member African-American",
+               latino = "Is member Latino",
+               "party:age" = "Democrat*member age",
+               "party:latino" = "Democrat*member Latino",
+               "party:african.american" = "Democrat*member AA",
+               "last.vote.share" = "Last vote share",
+               "pctUrban.state" = "Share of households urban",
+               "median.age.state" = "Median age of state",
+               "median.age.squared.state" = "Median age sq.",
+               "pctEduc_Health_SocSvcs.state" = "Share employed in E,H,SS",
+               "race.share_black.state" = "Share of state AA",
+               "race.share_hispanic.state" = "Share of state Hispanic",
+               "pctUrban.state:race.share_hispanic.state" = "Share urban*share Hispanic",
+               "pctUrban.state:race.share_black.state" = "Share urban*share AA",
+               "state.deaths:last.vote.share" = "State deaths*last vote share",
+               "state.deaths:party" = "State deaths*Democrat",
+               "state.deaths:age" = "State deaths*member age",
+               "state.deaths:latino" = "State deaths*member Latino",
+               "state.deaths:african.american" = "State deaths*member AA",
+               "state.deaths:pctEduc_Health_SocSvcs.state"="State deaths*share employed in E,H,SS",
+               "state.deaths:race.share_hispanic.state"="State deaths*share Hispanic",
+               "state.deaths:race.share_black.state"="State deaths*share African-American",
+               "state.deaths:pctUrban.state"="State deaths*share urban",
+               "state.deaths:median.age.state"="State deaths*median age"
+             )) %>% save_kable(file="Tables/CS_regressions/ForPaper/SenateGOP_lm.png")
+```
+
+## DV: GROUP 5 share of all tweets
+
+House (All)
+```{r}
+# Member factors
+
+h3Hni_g5a <- lm(100*group5.tweet.all.share ~ cd.deaths + state.deaths + last.vote.share + party + age + latino + african.american,
+             data=tweet.totals.official %>% filter(chamber=="House"))
+
+h3Hi_g5a <- lm(100*group5.tweet.all.share ~ cd.deaths*(last.vote.share + party + age + latino + african.american) + state.deaths*(last.vote.share + party + age + latino + african.american) ,
+             data=tweet.totals.official %>% filter(chamber=="House"))
+
+# Constituency factors
+
+h4Hni_g5a <- lm(100*group5.tweet.all.share ~ state.deaths + cd.deaths + pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd,
+   data=tweet.totals.official %>% filter(chamber=="House"))
+
+
+h4Hi_g5a <- lm(100*group5.tweet.all.share ~ cd.deaths*(pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd) + state.deaths*(pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd),
+   data=tweet.totals.official %>% filter(chamber=="House"))
+
+# All factors
+
+h3h4Hni_g5a <- lm(100*group5.tweet.all.share ~ cd.deaths + state.deaths + party + age + latino + african.american + last.vote.share +  pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd,
+             data=tweet.totals.official %>% filter(chamber=="House"))
+
+h3h4Hi_g5a <- lm(100*group5.tweet.all.share ~ cd.deaths*(party + age + latino + african.american + last.vote.share + pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd) + state.deaths*(party + age + latino + african.american + last.vote.share + pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd),
+             data=tweet.totals.official %>% filter(chamber=="House"))
+
+# Regression table
+
+modelsummary(list("Member factors"=h3Hni_g5a,
+                  "Member factors (interactions)"=h3Hi_g5a,
+                  "Constituency factors"=h4Hni_g5a,
+                  "Constituency factors (interactions)"=h4Hi_g5a,
+                  "All factors"=h3h4Hni_g5a,
+                  "All factors (interactions)"=h3h4Hi_g5a), 
+             coef_omit="(Intercept)", 
+             gof_omit="AIC|BIC|Log.Lik.|F", estimate="{estimate} ({std.error}){stars}",
+             statistic=NULL, stars=c('+'=0.1,'*'=.05, '**'=.01, '***'=0.001),
+             title="p-values: + = 0.1, * = 0.05, ** = 0.01, *** = 0.001", fmt = 3,
+             coef_rename = c(
+               cd.deaths = "District COVID-19 deaths (hundreds)",
+               state.deaths = "State COVID-19 deaths (hundreds)",
+               party = "Is a Democrat",
+               age = "Member age",
+               african.american = "Is member African-American",
+               latino = "Is member Latino",
+               "cd.deaths:party" = "District deaths*Democrat",
+               "party:age" = "Democrat*member age",
+               "party:latino" = "Democrat*member Latino",
+               "party:african.american" = "Democrat*member AA",
+               "last.vote.share" = "Last vote share",
+               "pctUrban.cd" = "Share of households urban",
+               "median.age.cd" = "Median age of district",
+               "median.age.squared.cd" = "Median age sq.",
+               "pctEduc_Health_SocSvcs.cd" = "Share employed in E,H,SS",
+               "race.share_black.cd" = "Share of district AA",
+               "race.share_hispanic.cd" = "Share of district Hispanic",
+               "cd.deaths:last.vote.share" = "District deaths*last vote share",
+               "cd.deaths:median.age.cd" = "District deaths*median age",
+               "cd.deaths:median.age.squared.cd" = "District deaths*median age sq.",
+               "cd.deaths:pctEduc_Health_SocSvcs.cd" = "District deaths*share employed in E,H,SS",
+               "cd.deaths:pctUrban.cd" = "District deaths*Share urban",
+               "cd.deaths:race.share_hispanic.cd" = "District deaths*share Hispanic",
+               "cd.deaths:race.share_black.cd" = "District deaths*share AA",
+               "pctUrban.cd:race.share_hispanic.cd" = "Share urban*share Hispanic",
+               "pctUrban.cd:race.share_black.cd" = "Share urban*share AA",
+               "cd.deaths:age" = "District deaths*member age",
+               "cd.deaths:latino" = "District deaths*member Latino",
+               "cd.deaths:african.american" = "District deaths*member AA",
+               "last.vote.share:state.deaths" = "State deaths*last vote share",
+               "party:state.deaths" = "State deaths*Democrat",
+               "age:state.deaths" = "State deaths*member age",
+               "latino:state.deaths" = "State deaths*member Latino",
+               "african.american:state.deaths" = "State deaths*member AA",
+               "pctEduc_Health_SocSvcs.cd:state.deaths"="State deaths*share employed in E,H,SS",
+               "race.share_hispanic.cd:state.deaths"="State deaths*share Hispanic",
+               "race.share_black.cd:state.deaths"="State deaths*share African-American"
+             )) %>% save_kable(file="Tables/CS_regressions/ForPaper/House_lm_Group5All.png")
+```
+
+Senate (All)
+```{r}
+# Member factors
+
+h3Sni_g5a <- lm(100*group5.tweet.all.share ~ state.deaths + last.vote.share + party + age + latino + african.american,
+             data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+h3Si_g5a <- lm(100*group5.tweet.all.share ~ state.deaths*(last.vote.share + party + age + latino + african.american) ,
+             data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+# Constituency factors
+
+h4Sni_g5a <- lm(100*group5.tweet.all.share ~ state.deaths + pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state,
+   data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+
+h4Si_g5a <- lm(100*group5.tweet.all.share ~ state.deaths*(pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state),
+   data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+# All factors
+
+h3h4Sni_g5a <- lm(100*group5.tweet.all.share ~ state.deaths + party + age + latino + african.american + last.vote.share +  pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state,
+             data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+h3h4Si_g5a <- lm(100*group5.tweet.all.share ~ state.deaths*(party + age + latino + african.american + last.vote.share + pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state),
+             data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+# Regression table
+
+modelsummary(list("Member factors"=h3Sni_g5a,
+                  "Member factors (interactions)"=h3Si_g5a,
+                  "Constituency factors"=h4Sni_g5a,
+                  "Constituency factors (interactions)"=h4Si_g5a,
+                  "All factors"=h3h4Sni_g5a,
+                  "All factors (interactions)"=h3h4Si_g5a), 
+             coef_omit="(Intercept)", 
+             gof_omit="AIC|BIC|Log.Lik.|F", estimate="{estimate} ({std.error}){stars}",
+             statistic=NULL, stars=c('+'=0.1,'*'=.05, '**'=.01, '***'=0.001),
+             title="p-values: + = 0.1, * = 0.05, ** = 0.01, *** = 0.001", fmt = 3,
+             coef_rename = c(
+               state.deaths = "State COVID-19 deaths (hundreds)",
+               party = "Is a Democrat",
+               age = "Member age",
+               african.american = "Is member African-American",
+               latino = "Is member Latino",
+               "party:age" = "Democrat*member age",
+               "party:latino" = "Democrat*member Latino",
+               "party:african.american" = "Democrat*member AA",
+               "last.vote.share" = "Last vote share",
+               "pctUrban.state" = "Share of households urban",
+               "median.age.state" = "Median age of state",
+               "median.age.squared.state" = "Median age sq.",
+               "pctEduc_Health_SocSvcs.state" = "Share employed in E,H,SS",
+               "race.share_black.state" = "Share of state AA",
+               "race.share_hispanic.state" = "Share of state Hispanic",
+               "pctUrban.state:race.share_hispanic.state" = "Share urban*share Hispanic",
+               "pctUrban.state:race.share_black.state" = "Share urban*share AA",
+               "state.deaths:last.vote.share" = "State deaths*last vote share",
+               "state.deaths:party" = "State deaths*Democrat",
+               "state.deaths:age" = "State deaths*member age",
+               "state.deaths:latino" = "State deaths*member Latino",
+               "state.deaths:african.american" = "State deaths*member AA",
+               "state.deaths:pctEduc_Health_SocSvcs.state"="State deaths*share employed in E,H,SS",
+               "state.deaths:race.share_hispanic.state"="State deaths*share Hispanic",
+               "state.deaths:race.share_black.state"="State deaths*share African-American",
+               "state.deaths:pctUrban.state"="State deaths*share urban",
+               "state.deaths:median.age.state"="State deaths*median age"
+             )) %>% save_kable(file="Tables/CS_regressions/ForPaper/Senate_lm_Group5All.png")
+```
+
+## DV: GROUP 5 share of covid tweets
+House (All)
+```{r}
+# Member factors
+
+h3Hni_g5c <- lm(100*group5.tweet.covid.share ~ cd.deaths + state.deaths + last.vote.share + party + age + latino + african.american,
+             data=tweet.totals.official %>% filter(chamber=="House"))
+
+h3Hi_g5c <- lm(100*group5.tweet.covid.share ~ cd.deaths*(last.vote.share + party + age + latino + african.american) + state.deaths*(last.vote.share + party + age + latino + african.american) ,
+             data=tweet.totals.official %>% filter(chamber=="House"))
+
+# Constituency factors
+
+h4Hni_g5c <- lm(100*group5.tweet.covid.share ~ state.deaths + cd.deaths + pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd,
+   data=tweet.totals.official %>% filter(chamber=="House"))
+
+
+h4Hi_g5c <- lm(100*group5.tweet.covid.share ~ cd.deaths*(pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd) + state.deaths*(pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd),
+   data=tweet.totals.official %>% filter(chamber=="House"))
+
+# All factors
+
+h3h4Hni_g5c <- lm(100*group5.tweet.covid.share ~ cd.deaths + state.deaths + party + age + latino + african.american + last.vote.share +  pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd,
+             data=tweet.totals.official %>% filter(chamber=="House"))
+
+h3h4Hi_g5c <- lm(100*group5.tweet.covid.share ~ cd.deaths*(party + age + latino + african.american + last.vote.share + pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd) + state.deaths*(party + age + latino + african.american + last.vote.share + pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd),
+             data=tweet.totals.official %>% filter(chamber=="House"))
+
+# Regression table
+
+modelsummary(list("Member factors"=h3Hni_g5c,
+                  "Member factors (interactions)"=h3Hi_g5c,
+                  "Constituency factors"=h4Hni_g5c,
+                  "Constituency factors (interactions)"=h4Hi_g5c,
+                  "All factors"=h3h4Hni_g5c,
+                  "All factors (interactions)"=h3h4Hi_g5c), 
+             coef_omit="(Intercept)", 
+             gof_omit="AIC|BIC|Log.Lik.|F", estimate="{estimate} ({std.error}){stars}",
+             statistic=NULL, stars=c('+'=0.1,'*'=.05, '**'=.01, '***'=0.001),
+             title="p-values: + = 0.1, * = 0.05, ** = 0.01, *** = 0.001", fmt = 3,
+             coef_rename = c(
+               cd.deaths = "District COVID-19 deaths (hundreds)",
+               state.deaths = "State COVID-19 deaths (hundreds)",
+               party = "Is a Democrat",
+               age = "Member age",
+               african.american = "Is member African-American",
+               latino = "Is member Latino",
+               "cd.deaths:party" = "District deaths*Democrat",
+               "party:age" = "Democrat*member age",
+               "party:latino" = "Democrat*member Latino",
+               "party:african.american" = "Democrat*member AA",
+               "last.vote.share" = "Last vote share",
+               "pctUrban.cd" = "Share of households urban",
+               "median.age.cd" = "Median age of district",
+               "median.age.squared.cd" = "Median age sq.",
+               "pctEduc_Health_SocSvcs.cd" = "Share employed in E,H,SS",
+               "race.share_black.cd" = "Share of district AA",
+               "race.share_hispanic.cd" = "Share of district Hispanic",
+               "cd.deaths:last.vote.share" = "District deaths*last vote share",
+               "cd.deaths:median.age.cd" = "District deaths*median age",
+               "cd.deaths:median.age.squared.cd" = "District deaths*median age sq.",
+               "cd.deaths:pctEduc_Health_SocSvcs.cd" = "District deaths*share employed in E,H,SS",
+               "cd.deaths:pctUrban.cd" = "District deaths*Share urban",
+               "cd.deaths:race.share_hispanic.cd" = "District deaths*share Hispanic",
+               "cd.deaths:race.share_black.cd" = "District deaths*share AA",
+               "pctUrban.cd:race.share_hispanic.cd" = "Share urban*share Hispanic",
+               "pctUrban.cd:race.share_black.cd" = "Share urban*share AA",
+               "cd.deaths:age" = "District deaths*member age",
+               "cd.deaths:latino" = "District deaths*member Latino",
+               "cd.deaths:african.american" = "District deaths*member AA",
+               "last.vote.share:state.deaths" = "State deaths*last vote share",
+               "party:state.deaths" = "State deaths*Democrat",
+               "age:state.deaths" = "State deaths*member age",
+               "latino:state.deaths" = "State deaths*member Latino",
+               "african.american:state.deaths" = "State deaths*member AA",
+               "pctEduc_Health_SocSvcs.cd:state.deaths"="State deaths*share employed in E,H,SS",
+               "race.share_hispanic.cd:state.deaths"="State deaths*share Hispanic",
+               "race.share_black.cd:state.deaths"="State deaths*share African-American"
+             )) %>% save_kable(file="Tables/CS_regressions/ForPaper/House_lm_Group5Covid.png")
+```
+
+Senate (All)
+```{r}
+# Member factors
+
+h3Sni_g5c <- lm(100*group5.tweet.covid.share ~ state.deaths + last.vote.share + party + age + latino + african.american,
+             data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+h3Si_g5c <- lm(100*group5.tweet.covid.share ~ state.deaths*(last.vote.share + party + age + latino + african.american) ,
+             data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+# Constituency factors
+
+h4Sni_g5c <- lm(100*group5.tweet.covid.share ~ state.deaths + pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state,
+   data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+
+h4Si_g5c <- lm(100*group5.tweet.covid.share ~ state.deaths*(pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state),
+   data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+# All factors
+
+h3h4Sni_g5c <- lm(100*group5.tweet.covid.share ~ state.deaths + party + age + latino + african.american + last.vote.share +  pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state,
+             data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+h3h4Si_g5c <- lm(100*group5.tweet.covid.share ~ state.deaths*(party + age + latino + african.american + last.vote.share + pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state),
+             data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+# Regression table
+
+modelsummary(list("Member factors"=h3Sni_g5a,
+                  "Member factors (interactions)"=h3Si_g5a,
+                  "Constituency factors"=h4Sni_g5a,
+                  "Constituency factors (interactions)"=h4Si_g5a,
+                  "All factors"=h3h4Sni_g5a,
+                  "All factors (interactions)"=h3h4Si_g5a), 
+             coef_omit="(Intercept)", 
+             gof_omit="AIC|BIC|Log.Lik.|F", estimate="{estimate} ({std.error}){stars}",
+             statistic=NULL, stars=c('+'=0.1,'*'=.05, '**'=.01, '***'=0.001),
+             title="p-values: + = 0.1, * = 0.05, ** = 0.01, *** = 0.001", fmt = 3,
+             coef_rename = c(
+               state.deaths = "State COVID-19 deaths (hundreds)",
+               party = "Is a Democrat",
+               age = "Member age",
+               african.american = "Is member African-American",
+               latino = "Is member Latino",
+               "party:age" = "Democrat*member age",
+               "party:latino" = "Democrat*member Latino",
+               "party:african.american" = "Democrat*member AA",
+               "last.vote.share" = "Last vote share",
+               "pctUrban.state" = "Share of households urban",
+               "median.age.state" = "Median age of state",
+               "median.age.squared.state" = "Median age sq.",
+               "pctEduc_Health_SocSvcs.state" = "Share employed in E,H,SS",
+               "race.share_black.state" = "Share of state AA",
+               "race.share_hispanic.state" = "Share of state Hispanic",
+               "pctUrban.state:race.share_hispanic.state" = "Share urban*share Hispanic",
+               "pctUrban.state:race.share_black.state" = "Share urban*share AA",
+               "state.deaths:last.vote.share" = "State deaths*last vote share",
+               "state.deaths:party" = "State deaths*Democrat",
+               "state.deaths:age" = "State deaths*member age",
+               "state.deaths:latino" = "State deaths*member Latino",
+               "state.deaths:african.american" = "State deaths*member AA",
+               "state.deaths:pctEduc_Health_SocSvcs.state"="State deaths*share employed in E,H,SS",
+               "state.deaths:race.share_hispanic.state"="State deaths*share Hispanic",
+               "state.deaths:race.share_black.state"="State deaths*share African-American",
+               "state.deaths:pctUrban.state"="State deaths*share urban",
+               "state.deaths:median.age.state"="State deaths*median age"
+             )) %>% save_kable(file="Tables/CS_regressions/ForPaper/Senate_lm_Group5Covid.png")
+```
+
+## DV: GROUP 6 share of all tweets
+
+House (All)
+```{r}
+# Member factors
+
+h3Hni_g6a <- lm(100*group6.tweet.all.share ~ cd.deaths + state.deaths + last.vote.share + party + age + latino + african.american,
+             data=tweet.totals.official %>% filter(chamber=="House"))
+
+h3Hi_g6a <- lm(100*group6.tweet.all.share ~ cd.deaths*(last.vote.share + party + age + latino + african.american) + state.deaths*(last.vote.share + party + age + latino + african.american) ,
+             data=tweet.totals.official %>% filter(chamber=="House"))
+
+# Constituency factors
+
+h4Hni_g6a <- lm(100*group6.tweet.all.share ~ state.deaths + cd.deaths + pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd,
+   data=tweet.totals.official %>% filter(chamber=="House"))
+
+
+h4Hi_g6a <- lm(100*group6.tweet.all.share ~ cd.deaths*(pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd) + state.deaths*(pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd),
+   data=tweet.totals.official %>% filter(chamber=="House"))
+
+# All factors
+
+h3h4Hni_g6a <- lm(100*group6.tweet.all.share ~ cd.deaths + state.deaths + party + age + latino + african.american + last.vote.share +  pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd,
+             data=tweet.totals.official %>% filter(chamber=="House"))
+
+h3h4Hi_g6a <- lm(100*group6.tweet.all.share ~ cd.deaths*(party + age + latino + african.american + last.vote.share + pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd) + state.deaths*(party + age + latino + african.american + last.vote.share + pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd),
+             data=tweet.totals.official %>% filter(chamber=="House"))
+
+# Regression table
+
+modelsummary(list("Member factors"=h3Hni_g6a,
+                  "Member factors (interactions)"=h3Hi_g6a,
+                  "Constituency factors"=h4Hni_g6a,
+                  "Constituency factors (interactions)"=h4Hi_g6a,
+                  "All factors"=h3h4Hni_g6a,
+                  "All factors (interactions)"=h3h4Hi_g6a), 
+             coef_omit="(Intercept)", 
+             gof_omit="AIC|BIC|Log.Lik.|F", estimate="{estimate} ({std.error}){stars}",
+             statistic=NULL, stars=c('+'=0.1,'*'=.05, '**'=.01, '***'=0.001),
+             title="p-values: + = 0.1, * = 0.05, ** = 0.01, *** = 0.001", fmt = 3,
+             coef_rename = c(
+               cd.deaths = "District COVID-19 deaths (hundreds)",
+               state.deaths = "State COVID-19 deaths (hundreds)",
+               party = "Is a Democrat",
+               age = "Member age",
+               african.american = "Is member African-American",
+               latino = "Is member Latino",
+               "cd.deaths:party" = "District deaths*Democrat",
+               "party:age" = "Democrat*member age",
+               "party:latino" = "Democrat*member Latino",
+               "party:african.american" = "Democrat*member AA",
+               "last.vote.share" = "Last vote share",
+               "pctUrban.cd" = "Share of households urban",
+               "median.age.cd" = "Median age of district",
+               "median.age.squared.cd" = "Median age sq.",
+               "pctEduc_Health_SocSvcs.cd" = "Share employed in E,H,SS",
+               "race.share_black.cd" = "Share of district AA",
+               "race.share_hispanic.cd" = "Share of district Hispanic",
+               "cd.deaths:last.vote.share" = "District deaths*last vote share",
+               "cd.deaths:median.age.cd" = "District deaths*median age",
+               "cd.deaths:median.age.squared.cd" = "District deaths*median age sq.",
+               "cd.deaths:pctEduc_Health_SocSvcs.cd" = "District deaths*share employed in E,H,SS",
+               "cd.deaths:pctUrban.cd" = "District deaths*Share urban",
+               "cd.deaths:race.share_hispanic.cd" = "District deaths*share Hispanic",
+               "cd.deaths:race.share_black.cd" = "District deaths*share AA",
+               "pctUrban.cd:race.share_hispanic.cd" = "Share urban*share Hispanic",
+               "pctUrban.cd:race.share_black.cd" = "Share urban*share AA",
+               "cd.deaths:age" = "District deaths*member age",
+               "cd.deaths:latino" = "District deaths*member Latino",
+               "cd.deaths:african.american" = "District deaths*member AA",
+               "last.vote.share:state.deaths" = "State deaths*last vote share",
+               "party:state.deaths" = "State deaths*Democrat",
+               "age:state.deaths" = "State deaths*member age",
+               "latino:state.deaths" = "State deaths*member Latino",
+               "african.american:state.deaths" = "State deaths*member AA",
+               "pctEduc_Health_SocSvcs.cd:state.deaths"="State deaths*share employed in E,H,SS",
+               "race.share_hispanic.cd:state.deaths"="State deaths*share Hispanic",
+               "race.share_black.cd:state.deaths"="State deaths*share African-American"
+             )) %>% save_kable(file="Tables/CS_regressions/ForPaper/House_lm_Group6All.png")
+```
+
+Senate (All)
+```{r}
+# Member factors
+
+h3Sni_g6a <- lm(100*group6.tweet.all.share ~ state.deaths + last.vote.share + party + age + latino + african.american,
+             data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+h3Si_g6a <- lm(100*group6.tweet.all.share ~ state.deaths*(last.vote.share + party + age + latino + african.american) ,
+             data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+# Constituency factors
+
+h4Sni_g6a <- lm(100*group6.tweet.all.share ~ state.deaths + pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state,
+   data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+
+h4Si_g6a <- lm(100*group6.tweet.all.share ~ state.deaths*(pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state),
+   data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+# All factors
+
+h3h4Sni_g6a <- lm(100*group6.tweet.all.share ~ state.deaths + party + age + latino + african.american + last.vote.share +  pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state,
+             data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+h3h4Si_g6a <- lm(100*group6.tweet.all.share ~ state.deaths*(party + age + latino + african.american + last.vote.share + pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state),
+             data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+# Regression table
+
+modelsummary(list("Member factors"=h3Sni_g6a,
+                  "Member factors (interactions)"=h3Si_g6a,
+                  "Constituency factors"=h4Sni_g6a,
+                  "Constituency factors (interactions)"=h4Si_g6a,
+                  "All factors"=h3h4Sni_g6a,
+                  "All factors (interactions)"=h3h4Si_g6a), 
+             coef_omit="(Intercept)", 
+             gof_omit="AIC|BIC|Log.Lik.|F", estimate="{estimate} ({std.error}){stars}",
+             statistic=NULL, stars=c('+'=0.1,'*'=.05, '**'=.01, '***'=0.001),
+             title="p-values: + = 0.1, * = 0.05, ** = 0.01, *** = 0.001", fmt = 3,
+             coef_rename = c(
+               state.deaths = "State COVID-19 deaths (hundreds)",
+               party = "Is a Democrat",
+               age = "Member age",
+               african.american = "Is member African-American",
+               latino = "Is member Latino",
+               "party:age" = "Democrat*member age",
+               "party:latino" = "Democrat*member Latino",
+               "party:african.american" = "Democrat*member AA",
+               "last.vote.share" = "Last vote share",
+               "pctUrban.state" = "Share of households urban",
+               "median.age.state" = "Median age of state",
+               "median.age.squared.state" = "Median age sq.",
+               "pctEduc_Health_SocSvcs.state" = "Share employed in E,H,SS",
+               "race.share_black.state" = "Share of state AA",
+               "race.share_hispanic.state" = "Share of state Hispanic",
+               "pctUrban.state:race.share_hispanic.state" = "Share urban*share Hispanic",
+               "pctUrban.state:race.share_black.state" = "Share urban*share AA",
+               "state.deaths:last.vote.share" = "State deaths*last vote share",
+               "state.deaths:party" = "State deaths*Democrat",
+               "state.deaths:age" = "State deaths*member age",
+               "state.deaths:latino" = "State deaths*member Latino",
+               "state.deaths:african.american" = "State deaths*member AA",
+               "state.deaths:pctEduc_Health_SocSvcs.state"="State deaths*share employed in E,H,SS",
+               "state.deaths:race.share_hispanic.state"="State deaths*share Hispanic",
+               "state.deaths:race.share_black.state"="State deaths*share African-American",
+               "state.deaths:pctUrban.state"="State deaths*share urban",
+               "state.deaths:median.age.state"="State deaths*median age"
+             )) %>% save_kable(file="Tables/CS_regressions/ForPaper/Senate_lm_Group6All.png")
+```
+
+## DV: GROUP 6 share of covid tweets
+House (All)
+```{r}
+# Member factors
+
+h3Hni_g6c <- lm(100*group6.tweet.covid.share ~ cd.deaths + state.deaths + last.vote.share + party + age + latino + african.american,
+             data=tweet.totals.official %>% filter(chamber=="House"))
+
+h3Hi_g6c <- lm(100*group6.tweet.covid.share ~ cd.deaths*(last.vote.share + party + age + latino + african.american) + state.deaths*(last.vote.share + party + age + latino + african.american) ,
+             data=tweet.totals.official %>% filter(chamber=="House"))
+
+# Constituency factors
+
+h4Hni_g6c <- lm(100*group6.tweet.covid.share ~ state.deaths + cd.deaths + pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd,
+   data=tweet.totals.official %>% filter(chamber=="House"))
+
+
+h4Hi_g6c <- lm(100*group6.tweet.covid.share ~ cd.deaths*(pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd) + state.deaths*(pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd),
+   data=tweet.totals.official %>% filter(chamber=="House"))
+
+# All factors
+
+h3h4Hni_g6c <- lm(100*group6.tweet.covid.share ~ cd.deaths + state.deaths + party + age + latino + african.american + last.vote.share +  pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd,
+             data=tweet.totals.official %>% filter(chamber=="House"))
+
+h3h4Hi_g6c <- lm(100*group6.tweet.covid.share ~ cd.deaths*(party + age + latino + african.american + last.vote.share + pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd) + state.deaths*(party + age + latino + african.american + last.vote.share + pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd),
+             data=tweet.totals.official %>% filter(chamber=="House"))
+
+# Regression table
+
+modelsummary(list("Member factors"=h3Hni_g6c,
+                  "Member factors (interactions)"=h3Hi_g6c,
+                  "Constituency factors"=h4Hni_g6c,
+                  "Constituency factors (interactions)"=h4Hi_g6c,
+                  "All factors"=h3h4Hni_g6c,
+                  "All factors (interactions)"=h3h4Hi_g6c), 
+             coef_omit="(Intercept)", 
+             gof_omit="AIC|BIC|Log.Lik.|F", estimate="{estimate} ({std.error}){stars}",
+             statistic=NULL, stars=c('+'=0.1,'*'=.05, '**'=.01, '***'=0.001),
+             title="p-values: + = 0.1, * = 0.05, ** = 0.01, *** = 0.001", fmt = 3,
+             coef_rename = c(
+               cd.deaths = "District COVID-19 deaths (hundreds)",
+               state.deaths = "State COVID-19 deaths (hundreds)",
+               party = "Is a Democrat",
+               age = "Member age",
+               african.american = "Is member African-American",
+               latino = "Is member Latino",
+               "cd.deaths:party" = "District deaths*Democrat",
+               "party:age" = "Democrat*member age",
+               "party:latino" = "Democrat*member Latino",
+               "party:african.american" = "Democrat*member AA",
+               "last.vote.share" = "Last vote share",
+               "pctUrban.cd" = "Share of households urban",
+               "median.age.cd" = "Median age of district",
+               "median.age.squared.cd" = "Median age sq.",
+               "pctEduc_Health_SocSvcs.cd" = "Share employed in E,H,SS",
+               "race.share_black.cd" = "Share of district AA",
+               "race.share_hispanic.cd" = "Share of district Hispanic",
+               "cd.deaths:last.vote.share" = "District deaths*last vote share",
+               "cd.deaths:median.age.cd" = "District deaths*median age",
+               "cd.deaths:median.age.squared.cd" = "District deaths*median age sq.",
+               "cd.deaths:pctEduc_Health_SocSvcs.cd" = "District deaths*share employed in E,H,SS",
+               "cd.deaths:pctUrban.cd" = "District deaths*Share urban",
+               "cd.deaths:race.share_hispanic.cd" = "District deaths*share Hispanic",
+               "cd.deaths:race.share_black.cd" = "District deaths*share AA",
+               "pctUrban.cd:race.share_hispanic.cd" = "Share urban*share Hispanic",
+               "pctUrban.cd:race.share_black.cd" = "Share urban*share AA",
+               "cd.deaths:age" = "District deaths*member age",
+               "cd.deaths:latino" = "District deaths*member Latino",
+               "cd.deaths:african.american" = "District deaths*member AA",
+               "last.vote.share:state.deaths" = "State deaths*last vote share",
+               "party:state.deaths" = "State deaths*Democrat",
+               "age:state.deaths" = "State deaths*member age",
+               "latino:state.deaths" = "State deaths*member Latino",
+               "african.american:state.deaths" = "State deaths*member AA",
+               "pctEduc_Health_SocSvcs.cd:state.deaths"="State deaths*share employed in E,H,SS",
+               "race.share_hispanic.cd:state.deaths"="State deaths*share Hispanic",
+               "race.share_black.cd:state.deaths"="State deaths*share African-American"
+             )) %>% save_kable(file="Tables/CS_regressions/ForPaper/House_lm_Group6Covid.png")
+```
+
+Senate (All)
+```{r}
+# Member factors
+
+h3Sni_g6c <- lm(100*group6.tweet.covid.share ~ state.deaths + last.vote.share + party + age + latino + african.american,
+             data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+h3Si_g6c <- lm(100*group6.tweet.covid.share ~ state.deaths*(last.vote.share + party + age + latino + african.american) ,
+             data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+# Constituency factors
+
+h4Sni_g6c <- lm(100*group6.tweet.covid.share ~ state.deaths + pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state,
+   data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+
+h4Si_g6c <- lm(100*group6.tweet.covid.share ~ state.deaths*(pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state),
+   data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+# All factors
+
+h3h4Sni_g6c <- lm(100*group6.tweet.covid.share ~ state.deaths + party + age + latino + african.american + last.vote.share +  pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state,
+             data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+h3h4Si_g6c <- lm(100*group6.tweet.covid.share ~ state.deaths*(party + age + latino + african.american + last.vote.share + pctUrban.state + median.age.state + pctEduc_Health_SocSvcs.state + race.share_hispanic.state + race.share_black.state),
+             data=tweet.totals.official %>% filter(chamber=="Senate"))
+
+# Regression table
+
+modelsummary(list("Member factors"=h3Sni_g5a,
+                  "Member factors (interactions)"=h3Si_g5a,
+                  "Constituency factors"=h4Sni_g5a,
+                  "Constituency factors (interactions)"=h4Si_g5a,
+                  "All factors"=h3h4Sni_g5a,
+                  "All factors (interactions)"=h3h4Si_g5a), 
+             coef_omit="(Intercept)", 
+             gof_omit="AIC|BIC|Log.Lik.|F", estimate="{estimate} ({std.error}){stars}",
+             statistic=NULL, stars=c('+'=0.1,'*'=.05, '**'=.01, '***'=0.001),
+             title="p-values: + = 0.1, * = 0.05, ** = 0.01, *** = 0.001", fmt = 3,
+             coef_rename = c(
+               state.deaths = "State COVID-19 deaths (hundreds)",
+               party = "Is a Democrat",
+               age = "Member age",
+               african.american = "Is member African-American",
+               latino = "Is member Latino",
+               "party:age" = "Democrat*member age",
+               "party:latino" = "Democrat*member Latino",
+               "party:african.american" = "Democrat*member AA",
+               "last.vote.share" = "Last vote share",
+               "pctUrban.state" = "Share of households urban",
+               "median.age.state" = "Median age of state",
+               "median.age.squared.state" = "Median age sq.",
+               "pctEduc_Health_SocSvcs.state" = "Share employed in E,H,SS",
+               "race.share_black.state" = "Share of state AA",
+               "race.share_hispanic.state" = "Share of state Hispanic",
+               "pctUrban.state:race.share_hispanic.state" = "Share urban*share Hispanic",
+               "pctUrban.state:race.share_black.state" = "Share urban*share AA",
+               "state.deaths:last.vote.share" = "State deaths*last vote share",
+               "state.deaths:party" = "State deaths*Democrat",
+               "state.deaths:age" = "State deaths*member age",
+               "state.deaths:latino" = "State deaths*member Latino",
+               "state.deaths:african.american" = "State deaths*member AA",
+               "state.deaths:pctEduc_Health_SocSvcs.state"="State deaths*share employed in E,H,SS",
+               "state.deaths:race.share_hispanic.state"="State deaths*share Hispanic",
+               "state.deaths:race.share_black.state"="State deaths*share African-American",
+               "state.deaths:pctUrban.state"="State deaths*share urban",
+               "state.deaths:median.age.state"="State deaths*median age"
+             )) %>% save_kable(file="Tables/CS_regressions/ForPaper/Senate_lm_Group6Covid.png")
+```
+## Interaction Plots
+District deaths*last vote share
+```{r}
+plot_model(h3Hi, type = "pred", terms=c("cd.deaths", "last.vote.share [48, 100]")) +
+  theme_light()
+
+plot_model(h3HDi, type = "pred", terms=c("cd.deaths", "last.vote.share [50, 100]")) +
+  #coord_cartesian(ylim = c(0, 60), xlim = c(0,200)) +
+  ylim(c(0,50)) +
+  labs(title="", x="District COVID-19 deaths (hundreds)", y="Share of tweets about COVID-19 (%)",
+       color="Last vote share") +
+  scale_color_manual(labels=c("50%", "100%"), values=c("orange3", "darkgreen")) +
+  scale_fill_manual(labels=c("50%", "100%"), values=c("orange3", "darkgreen")) +
+  theme_light() +
+  theme(
+    legend.position=c(0.5,1.05),
+    legend.direction = "horizontal",
+    legend.background = element_blank()
+  )
+
+plot_model(h3HDi, type = "pred", terms=c("cd.deaths", "last.vote.share [50, 75, 100]")) +
+  #coord_cartesian(ylim = c(0, 60), xlim = c(0,200)) +
+  ylim(c(0,50)) +
+  labs(title="", x="District COVID-19 deaths (hundreds)", y="Share of tweets about COVID-19 (%)",
+       color="Last vote share") +
+  scale_color_manual(labels=c("50%", "75%", "100%"), values=c("orange3", "navyblue", "darkgreen")) +
+  scale_fill_manual(labels=c("49%", "75%", "100%"), values=c("orange3", "navyblue", "darkgreen")) +
+  theme_light() +
+  theme(
+    legend.position=c(0.5,1.05),
+    legend.direction = "horizontal",
+    legend.background = element_blank()
+  )
+
+
+h3HDi_noimpute <- lm(100*tweet.share.covid ~ cd.deaths*(last.vote.share + age + latino + african.american) + state.deaths*(last.vote.share + age + latino + african.american), data=tweet.totals.official %>% filter(chamber=="House", party==1, !(district %in% missing_cds & state.abb=="NY")))
+
+plot_model(h3HDi_noimpute, type = "pred", terms=c("cd.deaths", "last.vote.share [50, 100]")) +
+  #coord_cartesian(ylim = c(0, 60), xlim = c(0,200)) +
+  ylim(c(0,50)) +
+  labs(title="", x="District COVID-19 deaths (hundreds)", y="Share of tweets about COVID-19 (%)",
+       color="Last vote share") +
+  scale_color_manual(labels=c("50%", "100%"), values=c("orange3", "darkgreen")) +
+  scale_fill_manual(labels=c("50%", "100%"), values=c("orange3", "darkgreen")) +
+  theme_light() +
+  theme(
+    legend.position=c(0.5,1.05),
+    legend.direction = "horizontal",
+    legend.background = element_blank()
+  )
+```
+
+District deaths*member Latino
+```{r}
+plot_model(h3h4HDi, type = "pred", terms=c("cd.deaths", "latino")) +
+  #coord_cartesian(ylim = c(0, 35), xlim = c(0,200)) +
+  labs(title="", x="District COVID-19 deaths (hundreds)", y="Share of tweets about COVID-19 (%)",
+       color="") +
+  scale_color_manual(labels=c("Non-Latino", "Latino"), values=c("orange2", "darkgreen")) +
+  scale_fill_manual(labels=c("Non-Latino", "Latino"), values=c("orange2", "darkgreen")) +
+  theme_light() +
+  theme(
+    legend.position=c(0.5,1.05),
+    legend.direction = "horizontal",
+    legend.background = element_blank()
+  )
+```
+District deaths*share urban
+```{r}
+plot_model(h3h4Hi, type = "pred", terms=c("cd.deaths", "pctUrban.cd [0.25, 0.75, 1]")) +
+  #coord_cartesian(ylim = c(0, 75), xlim = c(0,100)) +
+  labs(title="", x="District COVID-19 deaths (hundreds)", y="Share of tweets about COVID-19 (%)",
+       color="Share of district households urban") +
+  scale_color_manual(labels=c("25%", "75%", "100%"), values=c("orange2", "navyblue", "darkgreen")) +
+  scale_fill_manual(labels=c("25%", "75%", "100%"), values=c("orange2", "navyblue", "darkgreen")) +
+  theme_light() +
+  theme(
+    legend.position=c(0.5,1.05),
+    legend.direction = "horizontal",
+    legend.background = element_blank()
+  )
+
+plot_model(h3h4Hi, type = "int", terms=c("cd.deaths", "pctUrban.cd"))
+```
+
+Senate state deaths*urban
+```{r}
+plot_model(h3h4Si, type = "pred", terms=c("state.deaths", "pctUrban.state [0.25, 0.75, 1]")) +
+  coord_cartesian(ylim = c(0, 70), xlim = c(0,100)) +
+  labs(title="", x="State COVID-19 deaths (hundreds)", y="Share of tweets about COVID-19 (%)",
+       color="Share of state households urban") +
+  scale_color_manual(labels=c("25%", "75%", "100%"), values=c("orange2", "navyblue", "darkgreen")) +
+  scale_fill_manual(labels=c("25%", "75%", "100%"), values=c("orange2", "navyblue", "darkgreen")) +
+  theme_light() +
+  theme(
+    legend.position=c(0.5,1.05),
+    legend.direction = "horizontal",
+    legend.background = element_blank()
+  )
+
+plot_model(h3h4Si, type = "pred", terms=c("state.deaths", "pctUrban.state [0.5, 0.9]")) +
+  coord_cartesian(ylim = c(0, 60), xlim = c(0,100)) +
+  labs(title="", x="State COVID-19 deaths (hundreds)", y="Share of tweets about COVID-19 (%)",
+       color="Share of state households urban") +
+  scale_color_manual(labels=c("50%", "90%"), values=c("orange2", "darkgreen")) +
+  scale_fill_manual(labels=c("50%", "90%"), values=c("orange2", "darkgreen")) +
+  theme_light() +
+  theme(
+    legend.position=c(0.5,1.05),
+    legend.direction = "horizontal",
+    legend.background = element_blank()
+  )
+
+plot_model(h4Si, type = "pred", terms=c("state.deaths", "pctUrban.state [0.5, 0.9]")) +
+  coord_cartesian(ylim = c(0, 70), xlim = c(0,100)) +
+  labs(title="", x="State COVID-19 deaths (hundreds)", y="Share of tweets about COVID-19 (%)",
+       color="Share of state households urban") +
+  scale_color_manual(labels=c("25%", "100%"), values=c("orange2", "darkgreen")) +
+  scale_fill_manual(labels=c("25%", "100%"), values=c("orange2", "darkgreen")) +
+  theme_light() +
+  theme(
+    legend.position=c(0.5,1.05),
+    legend.direction = "horizontal",
+    legend.background = element_blank()
+  )
+```
+
+Senate state deaths*AA pop
+```{r}
+plot_model(h3h4Si, type = "pred", terms=c("state.deaths", "race.share_black.state [.05, .3]")) +
+  coord_cartesian(ylim = c(0, 60), xlim = c(0,100)) +
+  labs(title="", x="State COVID-19 deaths (hundreds)", y="Share of tweets about COVID-19 (%)",
+       color="Share of state African American") +
+  scale_color_manual(labels=c("5%", "30%"), values=c("orange2", "darkgreen")) +
+  scale_fill_manual(labels=c("5%", "30%"), values=c("orange2", "darkgreen")) +
+  theme_light() +
+  theme(
+    legend.position=c(0.5,1.05),
+    legend.direction = "horizontal",
+    legend.background = element_blank()
+  )
+```
+## Diagnostic plots
+
+Residuals vs. fitted values
+```{r}
+rf1 <- ggplot(data=h3h4Hi, aes(x=.fitted, y=.resid)) +
+  geom_point(color="orange3", size=1) +
+  labs(title="House", x="Fitted value", y="Residual") +
+  theme_light()
+
+rf2 <- ggplot(data=h3h4HDi, aes(x=.fitted, y=.resid)) +
+  geom_point(color="dodgerblue", size=1) +
+  labs(title="House Democrats", 
+       x="Fitted value", y="Residual") +
+  theme_light()
+
+rf3 <- ggplot(data=h3h4HRi, aes(x=.fitted, y=.resid)) +
+  geom_point(color="coral2", size=1) +
+  labs(title="House Republicans", 
+       x="Fitted value", y="Residual") +
+  theme_light()
+
+rf4 <- ggplot(data=h3h4Si, aes(x=.fitted, y=.resid)) +
+  geom_point(color="purple4", size=1) +
+  labs(title="Senate", 
+       x="Fitted value", y="Residual") +
+  theme_light()
+
+rf5 <- ggplot(data=h3h4SDi, aes(x=.fitted, y=.resid)) +
+  geom_point(color="navyblue", size=1) +
+  labs(title="Senate Democrats", 
+       x="Fitted value", y="Residual") +
+  theme_light()
+
+rf6 <- ggplot(data=h3h4SRi, aes(x=.fitted, y=.resid)) +
+  geom_point(color="darkred", size=1) +
+  labs(title="Senate Republicans", 
+       x="Fitted value", y="Residual") +
+  theme_light()
+
+grid.arrange(rf1, rf2, rf3, rf4, rf5, rf6, nrow=2)
+
+
+
+# ggplot(data=lm(100*tweet.share.covid ~ cd.deaths*(age + latino + african.american + last.vote.share + pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd) + state.deaths*(age + latino + african.american + last.vote.share + pctUrban.cd + median.age.cd + pctEduc_Health_SocSvcs.cd + race.share_hispanic.cd + race.share_black.cd),
+#              data=tweet.totals.official %>% filter(chamber=="House", party==0, name!="Will Hurd")),aes(x=.fitted, y=.resid)) +
+#   geom_point(color="coral2", size=1)
+```
+

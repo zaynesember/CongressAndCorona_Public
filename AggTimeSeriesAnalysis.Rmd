@@ -1,0 +1,1208 @@
+---
+title: "AggregateTimeSeriesAnalysis"
+output: html_notebook
+---
+
+```{r setup}
+library(xts)
+library(lmtest)
+library(tseries)
+#library(forecast)
+library(vars)
+library(tsDyn)
+library(Hmisc)
+library(tidyverse)
+library(stringr)
+#library(aTSA)
+```
+
+# House Daily Aggregate Time Series
+
+## Decompose daily series to get trends
+```{r}
+# Get variables needed
+temp <- data.frame(
+    date = (daily.covid.tweets %>% 
+              filter(chamber=="House"))$date,
+    tweet.count = (daily.covid.tweets %>% 
+                     filter(chamber=="House"))$covid.tweet.count,
+    tweet.share.all = (daily.covid.tweets %>% 
+                         filter(chamber=="House"))$covid.tweet.share,
+    group5.count = (daily.covid.tweets %>% 
+                      filter(chamber=="House"))$group5.tweet.count,
+    group5.share.covid = (daily.covid.tweets %>% 
+                            filter(chamber=="House"))$group5.tweet.covid.share,
+    group5.share.all = (daily.covid.tweets %>% 
+                          filter(chamber=="House"))$group5.tweet.all.share,
+    group6.count = (daily.covid.tweets %>% 
+                      filter(chamber=="House"))$group6.tweet.count,
+    group6.share.covid = (daily.covid.tweets %>% 
+                            filter(chamber=="House"))$group6.tweet.covid.share,
+    group6.share.all = (daily.covid.tweets %>% 
+                          filter(chamber=="House"))$group6.tweet.all.share,
+    inc.deaths = (daily.covid.tweets %>% 
+                    filter(chamber=="House"))$national_incremental_deaths,
+    inc.deaths.lead.7 = Lag((daily.covid.tweets %>% 
+                               filter(chamber=="House"))$national_incremental_deaths, shift=-7),
+    inc.deaths.lead.10 = Lag((daily.covid.tweets %>% 
+                                filter(chamber=="House"))$national_incremental_deaths, shift=-10),
+    inc.cases = (daily.covid.tweets %>% filter(chamber=="House"))$national_incremental_cases
+)
+
+# Convert to ts objects and decompose (hadts=House Aggregate Daily Time Series)
+# NOTE: Assuming additive type
+hadts <- lapply(lapply(as.list(temp[2:13]), ts, frequency=7),decompose,type="additive")
+
+names(hadts) <- c("tweet.count",
+                  "tweet.share.all",
+                  "group5.count",
+                  "group5.share.covid",
+                  "group5.share.all",
+                  "group6.count",
+                  "group6.share.covid",
+                  "group6.share.all",
+                  "inc.deaths",
+                  "inc.deaths.lead.7",
+                  "inc.deaths.lead.14",
+                  "inc.cases")
+
+# Plot to get a look at decompositions
+for(i in seq_along(hadts)){
+  plot(hadts[[i]])
+}
+
+# Put the decomposed trends into a df
+house.daily.trends <- as.data.frame(sapply(hadts,`[[`,"trend"))
+house.daily.trends$date <- (daily.covid.tweets %>% filter(chamber=="House"))$date
+
+# Get differences
+house.daily.trends <- house.daily.trends %>% 
+  mutate(across(1:12, .fns=diff.xts, na.pad=T, .names="diff_{col}"))
+```
+
+## Visualize trends briefly (USE TO INFORM GRANGER!)
+```{r}
+ggplot(data=house.daily.trends, aes(x=date)) +
+  #geom_line(aes(y=tweet.count/600), color="black") + # Maybe w/ cases
+  geom_line(aes(y=tweet.share.all), color="gray42") + # Maybe w/ cases
+  geom_line(aes(y=inc.deaths/1700), color="darkorange", linetype="dashed") +
+  #geom_line(aes(y=Lag(inc.deaths/1700,shift=-8)), color="black", linetype="dashed") + 
+  geom_line(aes(y=inc.cases/100000), color="darkred", linetype="dashed") +
+  theme_light()
+
+ggplot(data=house.daily.trends, aes(x=date)) +
+  #geom_line(aes(y=group5.count/200), color="darkblue") + # Maybe synch w/ cases
+  #geom_line(aes(y=group5.share.covid), color="blue") + # No synch
+  geom_line(aes(y=group5.share.all*5), color="turquoise") + # Maybe with cases
+  geom_line(aes(y=inc.deaths/2000), color="darkorange", linetype="dashed") +
+  geom_line(aes(y=inc.cases/170000), color="darkred", linetype="dashed") +
+  theme_light()
+
+ggplot(data=house.daily.trends, aes(x=date)) +
+  #geom_line(aes(y=group6.count/15), color="darkblue") + # Synchrony with cases maybe
+  #geom_line(aes(y=group6.share.covid*15), color="blue") + # Looks like no synchrony
+  geom_line(aes(y=group6.share.all*30), color="turquoise") + # Synchrony maybe
+  geom_line(aes(y=inc.deaths/2000), color="darkorange", linetype="dashed") +
+  geom_line(aes(y=inc.cases/170000), color="darkred", linetype="dashed") +
+  theme_light()
+
+```
+
+## Test trends for stationarity
+```{r, warn=F}
+t1 <- house.daily.trends %>% pivot_longer(-date,names_to="variable") %>% drop_na() %>% 
+  group_by(variable) %>% 
+  summarize(adf.p=ifelse(n() <= 3,NA, adf.test(value)$p.value)) %>% 
+  mutate(adf.p.sig = case_when(adf.p <= 0.05 ~ T, T ~ F))
+
+
+t2 <- house.daily.trends %>% pivot_longer(-date,names_to="variable") %>% drop_na() %>% 
+  group_by(variable) %>% 
+  summarize(pp.p=ifelse(n() <= 3,NA, pp.test(value)$p.value)) %>% 
+  mutate(pp.p.sig = case_when(pp.p <= 0.05 ~ T, T ~ F))
+
+t3 <- house.daily.trends %>% pivot_longer(-date,names_to="variable") %>% drop_na() %>% 
+  group_by(variable) %>% 
+  summarize(kpss.p=ifelse(n() <= 3,NA, kpss.test(value)$p.value)) %>% 
+  mutate(kpss.p.sig = case_when(kpss.p > 0.05 ~ T, T ~ F))
+
+hdts_stationarity <- left_join(left_join(t1, t2),t3) %>% 
+  mutate(passes.all=adf.p.sig & pp.p.sig & kpss.p.sig) %>% filter(passes.all==T)
+
+hdts_stationarity
+rm(t1,t2,t3)
+```
+So all my series are I(1); they must be differenced once to be stationary
+
+
+## Determine proper order for Granger test
+Following: https://davegiles.blogspot.com/2011/04/testing-for-granger-causality.html
+```{r}
+# Get the variables that passed stationarity testing (but in their undiffed form)
+# Leaving out differenced variable at end that passed
+hd_lags <- house.daily.trends[str_remove_all(
+  hdts_stationarity$variable[1:length(hdts_stationarity$variable)-1],
+  "diff_")] %>% pivot_longer(everything(), names_to="variable") %>% 
+  group_by(variable) %>% 
+  summarize(min.AIC.order=which.min(VARselect(na.omit(value), lag.max=60)$criteria[1,]),
+            min.HQ.order=which.min(VARselect(na.omit(value), lag.max=60)$criteria[2,]),
+            min.SC.order=which.min(VARselect(na.omit(value), lag.max=60)$criteria[3,]),
+            min.FPE.order=which.min(VARselect(na.omit(value), lag.max=60)$criteria[4,]),
+            ) %>% 
+  rowwise() %>% 
+  mutate(max.lag = max(across(-variable)))
+
+hd_lags
+```
+
+## Test for Granger causality
+```{r}
+# grangertest(y=house.daily.trends$diff_tweet.count,
+#             x=house.daily.trends$diff_inc.deaths.lead.7,
+#             order=16)
+# 
+# grangertest(y=house.daily.trends$diff_tweet.count,
+#             x=house.daily.trends$diff_inc.deaths.lead.14,
+#             order=16)
+
+
+hdgt <- house.daily.trends[hdts_stationarity$variable[1:length(hdts_stationarity$variable)-1]] %>% 
+  pivot_longer(contains("deaths"), names_to="x.variable", values_to="x.value") %>% 
+  pivot_longer(!(contains("deaths") | contains("x")), names_to="y.variable", values_to="y.value")
+
+x_vars <- unique(hdgt$x.variable)
+y_vars <- unique(hdgt$y.variable)
+
+hdgr <- data.frame(x=NA, y=NA, order=NA, granger.p=NA, rev.granger.p=NA)
+
+for(i in seq_along(x_vars)){
+  for(j in seq_along(y_vars)){
+    order <- max(hd_lags$max.lag[hd_lags$variable==str_remove(x_vars[i],"diff_")],
+                 hd_lags$max.lag[hd_lags$variable==str_remove(y_vars[j], "diff_")])
+    
+    #order <- 20
+    
+    x_vals <- (hdgt %>% filter(x.variable==x_vars[i] & y.variable==y_vars[j]))$x.value
+    y_vals <- (hdgt %>% filter(x.variable==x_vars[i] & y.variable==y_vars[j]))$y.value
+    
+    gt <- grangertest(x=x_vals, y=y_vals, order=order)
+    
+    # Test reverse
+    gt_rev <- grangertest(y=x_vals, x=y_vals, order=order)
+    
+    hdgr <- rbind(hdgr,c(x=x_vars[i], y=y_vars[j], order=order, 
+                         granger.p=round(gt$`Pr(>F)`[[2]],3), 
+                         rev.granger.p=round(gt_rev$`Pr(>F)`[[2]],3)))
+  }
+}
+
+hdgr <- hdgr %>% mutate(granger.sig = case_when(granger.p <= 0.05 ~ T, T ~ F),
+                        rev.granger.sig = case_when(rev.granger.p <= 0.05 ~ T, T ~ F)
+                        )
+hdgr
+```
+
+
+
+
+
+
+
+# House Democrats Daily Aggregate Time Series
+
+## Get daily counts by party
+```{r}
+chamber.party.daily.covid.tweets <- pan.tweets.flagged.ind %>%
+  ungroup() %>% 
+  mutate(not_covid_flag = recode(covid_flag, `0`=1, `1`=0)) %>% 
+  dplyr::select(-tweet.text, -document_ID) %>% 
+  mutate(party=case_when(party.code==100 ~ "Democrats", 
+                         party.code==200 ~ "Republicans", 
+                         T ~ "Other")) %>% 
+  filter(party != "Other") %>% 
+  group_by(date, chamber, party) %>%
+  dplyr::summarize(#natl.week.inc.cases = sum(replace_na(natl.inc.cases,0)),
+            #natl.week.inc.deaths = sum(replace_na(natl.inc.deaths,0)),
+            covid.tweet.count=sum(replace_na(covid_flag,0)),
+            total.tweet.count=sum(replace_na(not_covid_flag,0)),
+            group1.tweet.count=sum(replace_na(flag_1,0)),
+            group2.tweet.count=sum(replace_na(flag_2,0)),
+            group3.tweet.count=sum(replace_na(flag_3,0)),
+            group4.tweet.count=sum(replace_na(flag_4,0)),
+            group5.tweet.count=sum(replace_na(flag_5,0)),
+            group5_0.tweet.count=sum(replace_na(flag_5_0,0)),
+            group6.tweet.count=sum(replace_na(flag_6,0)),
+            group7.tweet.count=sum(replace_na(flag_7,0)),
+            group8.tweet.count=sum(replace_na(flag_8,0)),
+            group9.tweet.count=sum(replace_na(flag_9,0)),
+            retweet.count=sum(replace_na(retweets,0)),
+            like.count=sum(replace_na(likes,0))) %>% 
+  distinct() %>% 
+  mutate(
+    covid.tweet.share = covid.tweet.count/total.tweet.count,
+    group5.tweet.all.share = group5.tweet.count/total.tweet.count,
+    group5.tweet.covid.share = group5.tweet.count/covid.tweet.count,
+    group6.tweet.all.share = group6.tweet.count/total.tweet.count,
+    group6.tweet.covid.share = group6.tweet.count/covid.tweet.count,
+  ) %>% 
+  left_join(covid.national) %>% drop_na() %>% 
+  mutate(label=paste(chamber, party))
+```
+## Decompose daily series to get trends
+```{r}
+# Get variables needed
+temp <- data.frame(
+    date = (chamber.party.daily.covid.tweets %>% 
+              filter(label=="House Democrats"))$date,
+    tweet.count = (chamber.party.daily.covid.tweets %>% 
+                     filter(label=="House Democrats"))$covid.tweet.count,
+    tweet.share.all = (chamber.party.daily.covid.tweets %>% 
+                         filter(label=="House Democrats"))$covid.tweet.share,
+    group5.count = (chamber.party.daily.covid.tweets %>% 
+                      filter(label=="House Democrats"))$group5.tweet.count,
+    group5.share.covid = (chamber.party.daily.covid.tweets %>% 
+                            filter(label=="House Democrats"))$group5.tweet.covid.share,
+    group5.share.all = (chamber.party.daily.covid.tweets %>% 
+                          filter(label=="House Democrats"))$group5.tweet.all.share,
+    group6.count = (chamber.party.daily.covid.tweets %>% 
+                      filter(label=="House Democrats"))$group6.tweet.count,
+    group6.share.covid = (chamber.party.daily.covid.tweets %>% 
+                            filter(label=="House Democrats"))$group6.tweet.covid.share,
+    group6.share.all = (chamber.party.daily.covid.tweets %>% 
+                          filter(label=="House Democrats"))$group6.tweet.all.share,
+    inc.deaths = (chamber.party.daily.covid.tweets %>% 
+                    filter(label=="House Democrats"))$national_incremental_deaths,
+    inc.deaths.lead.7 = Lag((chamber.party.daily.covid.tweets %>% 
+                               filter(label=="House Democrats"))$national_incremental_deaths, shift=-7),
+    inc.deaths.lead.10 = Lag((chamber.party.daily.covid.tweets %>% 
+                                filter(label=="House Democrats"))$national_incremental_deaths, shift=-10),
+    inc.cases = (chamber.party.daily.covid.tweets %>% filter(label=="House Democrats"))$national_incremental_cases
+)
+
+# Convert to ts objects and decompose (hadts=House Aggregate Daily Time Series)
+# NOTE: Assuming additive type
+hdadts <- lapply(lapply(as.list(temp[2:13]), ts, frequency=7),decompose,type="additive")
+
+names(hdadts) <- c("tweet.count",
+                  "tweet.share.all",
+                  "group5.count",
+                  "group5.share.covid",
+                  "group5.share.all",
+                  "group6.count",
+                  "group6.share.covid",
+                  "group6.share.all",
+                  "inc.deaths",
+                  "inc.deaths.lead.7",
+                  "inc.deaths.lead.14",
+                  "inc.cases")
+
+# Plot to get a look at decompositions
+for(i in seq_along(hdadts)){
+  plot(hdadts[[i]])
+}
+
+# Put the decomposed trends into a df
+hd.daily.trends <- as.data.frame(sapply(hdadts,`[[`,"trend"))
+hd.daily.trends$date <- (chamber.party.daily.covid.tweets %>% filter(label=="House Democrats"))$date
+
+# Get differences
+hd.daily.trends <- hd.daily.trends %>% 
+  mutate(across(1:12, .fns=diff.xts, na.pad=T, .names="diff_{col}"))
+```
+## Visualize trends briefly (USE TO INFORM GRANGER!)
+```{r}
+ggplot(data=hd.daily.trends, aes(x=date)) +
+  #geom_line(aes(y=tweet.count/600), color="black") + # Maybe w/ cases
+  geom_line(aes(y=tweet.share.all), color="gray42") + # Maybe w/ cases
+  geom_line(aes(y=inc.deaths/1700), color="darkorange", linetype="dashed") +
+  #geom_line(aes(y=Lag(inc.deaths/1700,shift=-8)), color="black", linetype="dashed") + 
+  geom_line(aes(y=inc.cases/100000), color="darkred", linetype="dashed") +
+  theme_light()
+
+ggplot(data=hd.daily.trends, aes(x=date)) +
+  #geom_line(aes(y=group5.count/200), color="darkblue") + # Maybe synch w/ cases
+  #geom_line(aes(y=group5.share.covid), color="blue") + # No synch
+  geom_line(aes(y=group5.share.all*5), color="turquoise") + # Maybe with cases
+  geom_line(aes(y=inc.deaths/2000), color="darkorange", linetype="dashed") +
+  geom_line(aes(y=inc.cases/170000), color="darkred", linetype="dashed") +
+  theme_light()
+
+ggplot(data=hd.daily.trends, aes(x=date)) +
+  #geom_line(aes(y=group6.count/15), color="darkblue") + # Synchrony with cases maybe
+  #geom_line(aes(y=group6.share.covid*15), color="blue") + # Looks like no synchrony
+  geom_line(aes(y=group6.share.all*30), color="turquoise") + # Synchrony maybe
+  geom_line(aes(y=inc.deaths/2000), color="darkorange", linetype="dashed") +
+  geom_line(aes(y=inc.cases/170000), color="darkred", linetype="dashed") +
+  theme_light()
+
+```
+## Test trends for stationarity
+```{r, warn=F}
+t1 <- hd.daily.trends %>% pivot_longer(-date,names_to="variable") %>% drop_na() %>% 
+  group_by(variable) %>% 
+  summarize(adf.p=ifelse(n() <= 3,NA, adf.test(value)$p.value)) %>% 
+  mutate(adf.p.sig = case_when(adf.p <= 0.05 ~ T, T ~ F))
+
+
+t2 <- hd.daily.trends %>% pivot_longer(-date,names_to="variable") %>% drop_na() %>% 
+  group_by(variable) %>% 
+  summarize(pp.p=ifelse(n() <= 3,NA, pp.test(value)$p.value)) %>% 
+  mutate(pp.p.sig = case_when(pp.p <= 0.05 ~ T, T ~ F))
+
+t3 <- hd.daily.trends %>% pivot_longer(-date,names_to="variable") %>% drop_na() %>% 
+  group_by(variable) %>% 
+  summarize(kpss.p=ifelse(n() <= 3,NA, kpss.test(value)$p.value)) %>% 
+  mutate(kpss.p.sig = case_when(kpss.p > 0.05 ~ T, T ~ F))
+
+hddts_stationarity <- left_join(left_join(t1, t2),t3) %>% 
+  mutate(passes.all=adf.p.sig & pp.p.sig & kpss.p.sig) %>% filter(passes.all==T)
+
+hddts_stationarity
+rm(t1,t2,t3)
+```
+
+## Determine proper order for Granger test
+Following: https://davegiles.blogspot.com/2011/04/testing-for-granger-causality.html
+```{r}
+# Get the variables that passed stationarity testing (but in their undiffed form)
+# Leaving out differenced variable at end that passed
+hdd_lags <- hd.daily.trends[str_remove_all(
+  hddts_stationarity$variable[1:length(hddts_stationarity$variable)-1],
+  "diff_")] %>% pivot_longer(everything(), names_to="variable") %>% 
+  group_by(variable) %>% 
+  summarize(min.AIC.order=which.min(VARselect(na.omit(value), lag.max=60)$criteria[1,]),
+            min.HQ.order=which.min(VARselect(na.omit(value), lag.max=60)$criteria[2,]),
+            min.SC.order=which.min(VARselect(na.omit(value), lag.max=60)$criteria[3,]),
+            min.FPE.order=which.min(VARselect(na.omit(value), lag.max=60)$criteria[4,]),
+            ) %>% 
+  rowwise() %>% 
+  mutate(max.lag = max(across(-variable)))
+
+hdd_lags
+```
+
+## Test for Granger causality
+```{r}
+# grangertest(y=house.daily.trends$diff_tweet.count,
+#             x=house.daily.trends$diff_inc.deaths.lead.7,
+#             order=16)
+# 
+# grangertest(y=house.daily.trends$diff_tweet.count,
+#             x=house.daily.trends$diff_inc.deaths.lead.14,
+#             order=16)
+
+
+hddgt <- hd.daily.trends[hddts_stationarity$variable[1:length(hddts_stationarity$variable)-1]] %>% 
+  pivot_longer(contains("deaths"), names_to="x.variable", values_to="x.value") %>% 
+  pivot_longer(!(contains("deaths") | contains("x")), names_to="y.variable", values_to="y.value")
+
+x_vars <- unique(hddgt$x.variable)
+y_vars <- unique(hddgt$y.variable)
+
+hddgr <- data.frame(x=NA, y=NA, order=NA, granger.p=NA, rev.granger.p=NA)
+
+for(i in seq_along(x_vars)){
+  for(j in seq_along(y_vars)){
+    order <- max(hdd_lags$max.lag[hdd_lags$variable==str_remove(x_vars[i],"diff_")],
+                 hdd_lags$max.lag[hdd_lags$variable==str_remove(y_vars[j], "diff_")])
+    
+    #order <- 20
+    
+    x_vals <- (hddgt %>% filter(x.variable==x_vars[i] & y.variable==y_vars[j]))$x.value
+    y_vals <- (hddgt %>% filter(x.variable==x_vars[i] & y.variable==y_vars[j]))$y.value
+    
+    gt <- grangertest(x=x_vals, y=y_vals, order=order)
+    
+    # Test reverse
+    gt_rev <- grangertest(y=x_vals, x=y_vals, order=order)
+    
+    hddgr <- rbind(hddgr,c(x=x_vars[i], y=y_vars[j], order=order, 
+                         granger.p=round(gt$`Pr(>F)`[[2]],3), 
+                         rev.granger.p=round(gt_rev$`Pr(>F)`[[2]],3)))
+  }
+}
+
+hddgr <- hddgr %>% mutate(granger.sig = case_when(granger.p <= 0.05 ~ T, T ~ F),
+                        rev.granger.sig = case_when(rev.granger.p <= 0.05 ~ T, T ~ F)
+                        )
+hddgr
+```
+
+
+
+
+
+
+
+# House Republicans Daily Aggregate Time Series
+
+## Decompose daily series to get trends
+```{r}
+# Get variables needed
+temp <- data.frame(
+    date = (chamber.party.daily.covid.tweets %>% 
+              filter(label=="House Republicans"))$date,
+    tweet.count = (chamber.party.daily.covid.tweets %>% 
+                     filter(label=="House Republicans"))$covid.tweet.count,
+    tweet.share.all = (chamber.party.daily.covid.tweets %>% 
+                         filter(label=="House Republicans"))$covid.tweet.share,
+    group5.count = (chamber.party.daily.covid.tweets %>% 
+                      filter(label=="House Republicans"))$group5.tweet.count,
+    group5.share.covid = (chamber.party.daily.covid.tweets %>% 
+                            filter(label=="House Republicans"))$group5.tweet.covid.share,
+    group5.share.all = (chamber.party.daily.covid.tweets %>% 
+                          filter(label=="House Republicans"))$group5.tweet.all.share,
+    group6.count = (chamber.party.daily.covid.tweets %>% 
+                      filter(label=="House Republicans"))$group6.tweet.count,
+    group6.share.covid = (chamber.party.daily.covid.tweets %>% 
+                            filter(label=="House Republicans"))$group6.tweet.covid.share,
+    group6.share.all = (chamber.party.daily.covid.tweets %>% 
+                          filter(label=="House Republicans"))$group6.tweet.all.share,
+    inc.deaths = (chamber.party.daily.covid.tweets %>% 
+                    filter(label=="House Republicans"))$national_incremental_deaths,
+    inc.deaths.lead.7 = Lag((chamber.party.daily.covid.tweets %>% 
+                               filter(label=="House Republicans"))$national_incremental_deaths, shift=-7),
+    inc.deaths.lead.10 = Lag((chamber.party.daily.covid.tweets %>% 
+                                filter(label=="House Republicans"))$national_incremental_deaths, shift=-10),
+    inc.cases = (chamber.party.daily.covid.tweets %>% filter(label=="House Republicans"))$national_incremental_cases
+)
+
+# Convert to ts objects and decompose (hadts=House Aggregate Daily Time Series)
+# NOTE: Assuming additive type
+hradts <- lapply(lapply(as.list(temp[2:13]), ts, frequency=7),decompose,type="additive")
+
+names(hradts) <- c("tweet.count",
+                  "tweet.share.all",
+                  "group5.count",
+                  "group5.share.covid",
+                  "group5.share.all",
+                  "group6.count",
+                  "group6.share.covid",
+                  "group6.share.all",
+                  "inc.deaths",
+                  "inc.deaths.lead.7",
+                  "inc.deaths.lead.14",
+                  "inc.cases")
+
+# Plot to get a look at decompositions
+for(i in seq_along(hradts)){
+  plot(hradts[[i]])
+}
+
+# Put the decomposed trends into a df
+hr.daily.trends <- as.data.frame(sapply(hradts,`[[`,"trend"))
+hr.daily.trends$date <- (chamber.party.daily.covid.tweets %>% filter(label=="House Republicans"))$date
+
+# Get differences
+hr.daily.trends <- hr.daily.trends %>% 
+  mutate(across(1:12, .fns=diff.xts, na.pad=T, .names="diff_{col}"))
+```
+## Visualize trends briefly (USE TO INFORM GRANGER!)
+```{r}
+ggplot(data=hr.daily.trends, aes(x=date)) +
+  #geom_line(aes(y=tweet.count/600), color="black") + # Maybe w/ cases
+  geom_line(aes(y=tweet.share.all), color="gray42") + # Maybe w/ cases
+  geom_line(aes(y=inc.deaths/1700), color="darkorange", linetype="dashed") +
+  #geom_line(aes(y=Lag(inc.deaths/1700,shift=-8)), color="black", linetype="dashed") + 
+  geom_line(aes(y=inc.cases/100000), color="darkred", linetype="dashed") +
+  theme_light()
+
+ggplot(data=hr.daily.trends, aes(x=date)) +
+  #geom_line(aes(y=group5.count/200), color="darkblue") + # Maybe synch w/ cases
+  #geom_line(aes(y=group5.share.covid), color="blue") + # No synch
+  geom_line(aes(y=group5.share.all*5), color="turquoise") + # Maybe with cases
+  geom_line(aes(y=inc.deaths/2000), color="darkorange", linetype="dashed") +
+  geom_line(aes(y=inc.cases/170000), color="darkred", linetype="dashed") +
+  theme_light()
+
+ggplot(data=hr.daily.trends, aes(x=date)) +
+  #geom_line(aes(y=group6.count/15), color="darkblue") + # Synchrony with cases maybe
+  #geom_line(aes(y=group6.share.covid*15), color="blue") + # Looks like no synchrony
+  geom_line(aes(y=group6.share.all*30), color="turquoise") + # Synchrony maybe
+  geom_line(aes(y=inc.deaths/2000), color="darkorange", linetype="dashed") +
+  geom_line(aes(y=inc.cases/170000), color="darkred", linetype="dashed") +
+  theme_light()
+
+```
+## Test trends for stationarity
+```{r, warn=F}
+t1 <- hr.daily.trends %>% pivot_longer(-date,names_to="variable") %>% drop_na() %>% 
+  group_by(variable) %>% 
+  summarize(adf.p=ifelse(n() <= 3,NA, adf.test(value)$p.value)) %>% 
+  mutate(adf.p.sig = case_when(adf.p <= 0.05 ~ T, T ~ F))
+
+t2 <- hr.daily.trends %>% pivot_longer(-date,names_to="variable") %>% drop_na() %>% 
+  group_by(variable) %>% 
+  summarize(pp.p=ifelse(n() <= 3,NA, pp.test(value)$p.value)) %>% 
+  mutate(pp.p.sig = case_when(pp.p <= 0.05 ~ T, T ~ F))
+
+t3 <- hr.daily.trends %>% pivot_longer(-date,names_to="variable") %>% drop_na() %>% 
+  group_by(variable) %>% 
+  summarize(kpss.p=ifelse(n() <= 3,NA, kpss.test(value)$p.value)) %>% 
+  mutate(kpss.p.sig = case_when(kpss.p > 0.05 ~ T, T ~ F))
+
+hrdts_stationarity <- left_join(left_join(t1, t2),t3) %>% 
+  mutate(passes.all=adf.p.sig & pp.p.sig & kpss.p.sig) %>% filter(passes.all==T)
+
+hrdts_stationarity
+rm(t1,t2,t3)
+```
+
+## Determine proper order for Granger test
+Following: https://davegiles.blogspot.com/2011/04/testing-for-granger-causality.html
+```{r}
+# Get the variables that passed stationarity testing (but in their undiffed form)
+# Leaving out differenced variable at end that passed
+hrd_lags <- hr.daily.trends[str_remove_all(
+  hrdts_stationarity$variable[1:length(hrdts_stationarity$variable)-1],
+  "diff_")] %>% pivot_longer(everything(), names_to="variable") %>% 
+  group_by(variable) %>% 
+  summarize(min.AIC.order=which.min(VARselect(na.omit(value), lag.max=60)$criteria[1,]),
+            min.HQ.order=which.min(VARselect(na.omit(value), lag.max=60)$criteria[2,]),
+            min.SC.order=which.min(VARselect(na.omit(value), lag.max=60)$criteria[3,]),
+            min.FPE.order=which.min(VARselect(na.omit(value), lag.max=60)$criteria[4,]),
+            ) %>% 
+  rowwise() %>% 
+  mutate(max.lag = max(across(-variable)))
+
+hrd_lags
+```
+
+## Test for Granger causality
+```{r}
+# grangertest(y=house.daily.trends$diff_tweet.count,
+#             x=house.daily.trends$diff_inc.deaths.lead.7,
+#             order=16)
+# 
+# grangertest(y=house.daily.trends$diff_tweet.count,
+#             x=house.daily.trends$diff_inc.deaths.lead.14,
+#             order=16)
+
+
+hrdgt <- hr.daily.trends[hrdts_stationarity$variable[1:length(hrdts_stationarity$variable)-1]] %>% 
+  pivot_longer(contains("deaths"), names_to="x.variable", values_to="x.value") %>% 
+  pivot_longer(!(contains("deaths") | contains("x")), names_to="y.variable", values_to="y.value")
+
+x_vars <- unique(hrdgt$x.variable)
+y_vars <- unique(hrdgt$y.variable)
+
+hrdgr <- data.frame(x=NA, y=NA, order=NA, granger.p=NA, rev.granger.p=NA)
+
+for(i in seq_along(x_vars)){
+  for(j in seq_along(y_vars)){
+    order <- max(hrd_lags$max.lag[hrd_lags$variable==str_remove(x_vars[i],"diff_")],
+                 hrd_lags$max.lag[hrd_lags$variable==str_remove(y_vars[j], "diff_")])
+    
+    #order <- 20
+    
+    x_vals <- (hrdgt %>% filter(x.variable==x_vars[i] & y.variable==y_vars[j]))$x.value
+    y_vals <- (hrdgt %>% filter(x.variable==x_vars[i] & y.variable==y_vars[j]))$y.value
+    
+    gt <- grangertest(x=x_vals, y=y_vals, order=order)
+    
+    # Test reverse
+    gt_rev <- grangertest(y=x_vals, x=y_vals, order=order)
+    
+    hrdgr <- rbind(hrdgr,c(x=x_vars[i], y=y_vars[j], order=order, 
+                         granger.p=round(gt$`Pr(>F)`[[2]],3), 
+                         rev.granger.p=round(gt_rev$`Pr(>F)`[[2]],3)))
+  }
+}
+
+hrdgr <- hrdgr %>% mutate(granger.sig = case_when(granger.p <= 0.05 ~ T, T ~ F),
+                        rev.granger.sig = case_when(rev.granger.p <= 0.05 ~ T, T ~ F)
+                        )
+hrdgr
+```
+
+
+
+
+
+
+
+# Senate Daily Aggregate Time Series
+
+## Decompose daily series to get trends
+```{r}
+# Get variables needed
+temp <- data.frame(
+    date = (daily.covid.tweets %>% 
+              filter(chamber=="Senate"))$date,
+    tweet.count = (daily.covid.tweets %>% 
+                     filter(chamber=="Senate"))$covid.tweet.count,
+    tweet.share.all = (daily.covid.tweets %>% 
+                         filter(chamber=="Senate"))$covid.tweet.share,
+    group5.count = (daily.covid.tweets %>% 
+                      filter(chamber=="Senate"))$group5.tweet.count,
+    group5.share.covid = (daily.covid.tweets %>% 
+                            filter(chamber=="Senate"))$group5.tweet.covid.share,
+    group5.share.all = (daily.covid.tweets %>% 
+                          filter(chamber=="Senate"))$group5.tweet.all.share,
+    group6.count = (daily.covid.tweets %>% 
+                      filter(chamber=="Senate"))$group6.tweet.count,
+    group6.share.covid = (daily.covid.tweets %>% 
+                            filter(chamber=="Senate"))$group6.tweet.covid.share,
+    group6.share.all = (daily.covid.tweets %>% 
+                          filter(chamber=="Senate"))$group6.tweet.all.share,
+    inc.deaths = (daily.covid.tweets %>% 
+                    filter(chamber=="Senate"))$national_incremental_deaths,
+    inc.deaths.lead.7 = Lag((daily.covid.tweets %>% 
+                               filter(chamber=="Senate"))$national_incremental_deaths, shift=-7),
+    inc.deaths.lead.10 = Lag((daily.covid.tweets %>% 
+                                filter(chamber=="Senate"))$national_incremental_deaths, shift=-10),
+    inc.cases = (daily.covid.tweets %>% filter(chamber=="Senate"))$national_incremental_cases
+)
+
+# Convert to ts objects and decompose (hadts=House Aggregate Daily Time Series)
+# NOTE: Assuming additive type
+sadts <- lapply(lapply(as.list(temp[2:13]), ts, frequency=7),decompose,type="additive")
+
+names(sadts) <- c("tweet.count",
+                  "tweet.share.all",
+                  "group5.count",
+                  "group5.share.covid",
+                  "group5.share.all",
+                  "group6.count",
+                  "group6.share.covid",
+                  "group6.share.all",
+                  "inc.deaths",
+                  "inc.deaths.lead.7",
+                  "inc.deaths.lead.14",
+                  "inc.cases")
+
+# Plot to get a look at decompositions
+for(i in seq_along(sadts)){
+  plot(sadts[[i]])
+}
+
+# Put the decomposed trends into a df
+senate.daily.trends <- as.data.frame(sapply(sadts,`[[`,"trend"))
+senate.daily.trends$date <- (daily.covid.tweets %>% filter(chamber=="Senate"))$date
+
+# Get differences
+senate.daily.trends <- senate.daily.trends %>% 
+  mutate(across(1:12, .fns=diff.xts, na.pad=T, .names="diff_{col}"))
+```
+
+## Visualize trends briefly (USE TO INFORM GRANGER!)
+```{r}
+ggplot(data=senate.daily.trends, aes(x=date)) +
+  #geom_line(aes(y=tweet.count/600), color="black") + # Maybe w/ cases
+  geom_line(aes(y=tweet.share.all), color="gray42") + # Maybe w/ cases
+  geom_line(aes(y=inc.deaths/1700), color="darkorange", linetype="dashed") +
+  #geom_line(aes(y=Lag(inc.deaths/1700,shift=-8)), color="black", linetype="dashed") + 
+  geom_line(aes(y=inc.cases/100000), color="darkred", linetype="dashed") +
+  theme_light()
+
+ggplot(data=senate.daily.trends, aes(x=date)) +
+  #geom_line(aes(y=group5.count/200), color="darkblue") + # Maybe synch w/ cases
+  #geom_line(aes(y=group5.share.covid), color="blue") + # No synch
+  geom_line(aes(y=group5.share.all*5), color="turquoise") + # Maybe with cases
+  geom_line(aes(y=inc.deaths/2000), color="darkorange", linetype="dashed") +
+  geom_line(aes(y=inc.cases/170000), color="darkred", linetype="dashed") +
+  theme_light()
+
+ggplot(data=senate.daily.trends, aes(x=date)) +
+  #geom_line(aes(y=group6.count/15), color="darkblue") + # Synchrony with cases maybe
+  #geom_line(aes(y=group6.share.covid*15), color="blue") + # Looks like no synchrony
+  geom_line(aes(y=group6.share.all*30), color="turquoise") + # Synchrony maybe
+  geom_line(aes(y=inc.deaths/2000), color="darkorange", linetype="dashed") +
+  geom_line(aes(y=inc.cases/170000), color="darkred", linetype="dashed") +
+  theme_light()
+
+```
+
+## Test trends for stationarity
+```{r, warn=F}
+t1 <- senate.daily.trends %>% pivot_longer(-date,names_to="variable") %>% drop_na() %>% 
+  group_by(variable) %>% 
+  summarize(adf.p=ifelse(n() <= 3,NA, adf.test(value)$p.value)) %>% 
+  mutate(adf.p.sig = case_when(adf.p <= 0.05 ~ T, T ~ F))
+
+
+t2 <- senate.daily.trends %>% pivot_longer(-date,names_to="variable") %>% drop_na() %>% 
+  group_by(variable) %>% 
+  summarize(pp.p=ifelse(n() <= 3,NA, pp.test(value)$p.value)) %>% 
+  mutate(pp.p.sig = case_when(pp.p <= 0.05 ~ T, T ~ F))
+
+t3 <- senate.daily.trends %>% pivot_longer(-date,names_to="variable") %>% drop_na() %>% 
+  group_by(variable) %>% 
+  summarize(kpss.p=ifelse(n() <= 3,NA, kpss.test(value)$p.value)) %>% 
+  mutate(kpss.p.sig = case_when(kpss.p > 0.05 ~ T, T ~ F))
+
+sdts_stationarity <- left_join(left_join(t1, t2),t3) %>% 
+  mutate(passes.all=adf.p.sig & pp.p.sig & kpss.p.sig) %>% filter(passes.all==T)
+
+sdts_stationarity
+rm(t1,t2,t3)
+```
+So all my series are I(1); they must be differenced once to be stationary
+
+
+## Determine proper order for Granger test
+Following: https://davegiles.blogspot.com/2011/04/testing-for-granger-causality.html
+```{r}
+# Get the variables that passed stationarity testing (but in their undiffed form)
+# Leaving out differenced variable at end that passed
+sd_lags <- senate.daily.trends[str_remove_all(
+  sdts_stationarity$variable[1:length(sdts_stationarity$variable)],
+  "diff_")] %>% pivot_longer(everything(), names_to="variable") %>% 
+  group_by(variable) %>% 
+  summarize(min.AIC.order=which.min(VARselect(na.omit(value), lag.max=60)$criteria[1,]),
+            min.HQ.order=which.min(VARselect(na.omit(value), lag.max=60)$criteria[2,]),
+            min.SC.order=which.min(VARselect(na.omit(value), lag.max=60)$criteria[3,]),
+            min.FPE.order=which.min(VARselect(na.omit(value), lag.max=60)$criteria[4,]),
+            ) %>% 
+  rowwise() %>% 
+  mutate(max.lag = max(across(-variable)))
+
+sd_lags
+```
+
+## Test for Granger causality
+```{r}
+# grangertest(y=house.daily.trends$diff_tweet.count,
+#             x=house.daily.trends$diff_inc.deaths.lead.7,
+#             order=16)
+# 
+# grangertest(y=house.daily.trends$diff_tweet.count,
+#             x=house.daily.trends$diff_inc.deaths.lead.14,
+#             order=16)
+
+
+sdgt <- senate.daily.trends[sdts_stationarity$variable[1:length(sdts_stationarity$variable)]] %>% 
+  pivot_longer(contains("deaths"), names_to="x.variable", values_to="x.value") %>% 
+  pivot_longer(!(contains("deaths") | contains("x")), names_to="y.variable", values_to="y.value")
+
+x_vars <- unique(sdgt$x.variable)
+y_vars <- unique(sdgt$y.variable)
+
+sdgr <- data.frame(x=NA, y=NA, order=NA, granger.p=NA, rev.granger.p=NA)
+
+for(i in seq_along(x_vars)){
+  for(j in seq_along(y_vars)){
+    order <- max(sd_lags$max.lag[sd_lags$variable==str_remove(x_vars[i],"diff_")],
+                 sd_lags$max.lag[sd_lags$variable==str_remove(y_vars[j], "diff_")])
+    
+    #order <- 20
+    
+    x_vals <- (sdgt %>% filter(x.variable==x_vars[i] & y.variable==y_vars[j]))$x.value
+    y_vals <- (sdgt %>% filter(x.variable==x_vars[i] & y.variable==y_vars[j]))$y.value
+    
+    gt <- grangertest(x=x_vals, y=y_vals, order=order)
+    
+    # Test reverse
+    gt_rev <- grangertest(y=x_vals, x=y_vals, order=order)
+    
+    sdgr <- rbind(sdgr,c(x=x_vars[i], y=y_vars[j], order=order, 
+                         granger.p=round(gt$`Pr(>F)`[[2]],3), 
+                         rev.granger.p=round(gt_rev$`Pr(>F)`[[2]],3)))
+  }
+}
+
+sdgr <- sdgr %>% mutate(granger.sig = case_when(granger.p <= 0.05 ~ T, T ~ F),
+                        rev.granger.sig = case_when(rev.granger.p <= 0.05 ~ T, T ~ F)
+                        )
+sdgr
+```
+
+
+
+
+# Senate Democrats Daily Aggregate Time Series
+
+## Decompose daily series to get trends
+```{r}
+# Get variables needed
+temp <- data.frame(
+    date = (chamber.party.daily.covid.tweets %>% 
+              filter(label=="Senate Democrats"))$date,
+    tweet.count = (chamber.party.daily.covid.tweets %>% 
+                     filter(label=="Senate Democrats"))$covid.tweet.count,
+    tweet.share.all = (chamber.party.daily.covid.tweets %>% 
+                         filter(label=="Senate Democrats"))$covid.tweet.share,
+    group5.count = (chamber.party.daily.covid.tweets %>% 
+                      filter(label=="Senate Democrats"))$group5.tweet.count,
+    group5.share.covid = (chamber.party.daily.covid.tweets %>% 
+                            filter(label=="Senate Democrats"))$group5.tweet.covid.share,
+    group5.share.all = (chamber.party.daily.covid.tweets %>% 
+                          filter(label=="Senate Democrats"))$group5.tweet.all.share,
+    group6.count = (chamber.party.daily.covid.tweets %>% 
+                      filter(label=="Senate Democrats"))$group6.tweet.count,
+    group6.share.covid = (chamber.party.daily.covid.tweets %>% 
+                            filter(label=="Senate Democrats"))$group6.tweet.covid.share,
+    group6.share.all = (chamber.party.daily.covid.tweets %>% 
+                          filter(label=="Senate Democrats"))$group6.tweet.all.share,
+    inc.deaths = (chamber.party.daily.covid.tweets %>% 
+                    filter(label=="Senate Democrats"))$national_incremental_deaths,
+    inc.deaths.lead.7 = Lag((chamber.party.daily.covid.tweets %>% 
+                               filter(label=="Senate Democrats"))$national_incremental_deaths, shift=-7),
+    inc.deaths.lead.10 = Lag((chamber.party.daily.covid.tweets %>% 
+                                filter(label=="Senate Democrats"))$national_incremental_deaths, shift=-10),
+    inc.cases = (chamber.party.daily.covid.tweets %>% filter(label=="Senate Democrats"))$national_incremental_cases
+)
+
+# Convert to ts objects and decompose (hadts=House Aggregate Daily Time Series)
+# NOTE: Assuming additive type
+sdadts <- lapply(lapply(as.list(temp[2:13]), ts, frequency=7),decompose,type="additive")
+
+names(sdadts) <- c("tweet.count",
+                  "tweet.share.all",
+                  "group5.count",
+                  "group5.share.covid",
+                  "group5.share.all",
+                  "group6.count",
+                  "group6.share.covid",
+                  "group6.share.all",
+                  "inc.deaths",
+                  "inc.deaths.lead.7",
+                  "inc.deaths.lead.14",
+                  "inc.cases")
+
+# Plot to get a look at decompositions
+for(i in seq_along(sdadts)){
+  plot(sdadts[[i]])
+}
+
+# Put the decomposed trends into a df
+sd.daily.trends <- as.data.frame(sapply(sdadts,`[[`,"trend"))
+sd.daily.trends$date <- (chamber.party.daily.covid.tweets %>% filter(label=="Senate Democrats"))$date
+
+# Get differences
+sd.daily.trends <- sd.daily.trends %>% 
+  mutate(across(1:12, .fns=diff.xts, na.pad=T, .names="diff_{col}"))
+```
+## Visualize trends briefly (USE TO INFORM GRANGER!)
+```{r}
+ggplot(data=sd.daily.trends, aes(x=date)) +
+  #geom_line(aes(y=tweet.count/600), color="black") + # Maybe w/ cases
+  geom_line(aes(y=tweet.share.all), color="gray42") + # Maybe w/ cases
+  geom_line(aes(y=inc.deaths/1700), color="darkorange", linetype="dashed") +
+  #geom_line(aes(y=Lag(inc.deaths/1700,shift=-8)), color="black", linetype="dashed") + 
+  geom_line(aes(y=inc.cases/100000), color="darkred", linetype="dashed") +
+  theme_light()
+
+ggplot(data=sd.daily.trends, aes(x=date)) +
+  #geom_line(aes(y=group5.count/200), color="darkblue") + # Maybe synch w/ cases
+  #geom_line(aes(y=group5.share.covid), color="blue") + # No synch
+  geom_line(aes(y=group5.share.all*5), color="turquoise") + # Maybe with cases
+  geom_line(aes(y=inc.deaths/2000), color="darkorange", linetype="dashed") +
+  geom_line(aes(y=inc.cases/170000), color="darkred", linetype="dashed") +
+  theme_light()
+
+ggplot(data=sd.daily.trends, aes(x=date)) +
+  #geom_line(aes(y=group6.count/15), color="darkblue") + # Synchrony with cases maybe
+  #geom_line(aes(y=group6.share.covid*15), color="blue") + # Looks like no synchrony
+  geom_line(aes(y=group6.share.all*30), color="turquoise") + # Synchrony maybe
+  geom_line(aes(y=inc.deaths/2000), color="darkorange", linetype="dashed") +
+  geom_line(aes(y=inc.cases/170000), color="darkred", linetype="dashed") +
+  theme_light()
+
+```
+## Test trends for stationarity
+```{r, warn=F}
+t1 <- sd.daily.trends %>% pivot_longer(-date,names_to="variable") %>% drop_na() %>% 
+  group_by(variable) %>% 
+  summarize(adf.p=ifelse(n() <= 3,NA, adf.test(value)$p.value)) %>% 
+  mutate(adf.p.sig = case_when(adf.p <= 0.05 ~ T, T ~ F))
+
+
+t2 <- sd.daily.trends %>% pivot_longer(-date,names_to="variable") %>% drop_na() %>% 
+  group_by(variable) %>% 
+  summarize(pp.p=ifelse(n() <= 3,NA, pp.test(value)$p.value)) %>% 
+  mutate(pp.p.sig = case_when(pp.p <= 0.05 ~ T, T ~ F))
+
+t3 <- sd.daily.trends %>% pivot_longer(-date,names_to="variable") %>% drop_na() %>% 
+  group_by(variable) %>% 
+  summarize(kpss.p=ifelse(n() <= 3,NA, kpss.test(value)$p.value)) %>% 
+  mutate(kpss.p.sig = case_when(kpss.p > 0.05 ~ T, T ~ F))
+
+sddts_stationarity <- left_join(left_join(t1, t2),t3) %>% 
+  mutate(passes.all=adf.p.sig & pp.p.sig & kpss.p.sig) %>% filter(passes.all==T)
+
+sddts_stationarity
+rm(t1,t2,t3)
+```
+
+## Determine proper order for Granger test
+Following: https://davegiles.blogspot.com/2011/04/testing-for-granger-causality.html
+```{r}
+# Get the variables that passed stationarity testing (but in their undiffed form)
+# Leaving out differenced variable at end that passed
+sdd_lags <- sd.daily.trends[str_remove_all(
+  sddts_stationarity$variable[1:length(sddts_stationarity$variable)-1],
+  "diff_")] %>% pivot_longer(everything(), names_to="variable") %>% 
+  group_by(variable) %>% 
+  summarize(min.AIC.order=which.min(VARselect(na.omit(value), lag.max=60)$criteria[1,]),
+            min.HQ.order=which.min(VARselect(na.omit(value), lag.max=60)$criteria[2,]),
+            min.SC.order=which.min(VARselect(na.omit(value), lag.max=60)$criteria[3,]),
+            min.FPE.order=which.min(VARselect(na.omit(value), lag.max=60)$criteria[4,]),
+            ) %>% 
+  rowwise() %>% 
+  mutate(max.lag = max(across(-variable)))
+
+sdd_lags
+```
+
+## Test for Granger causality
+```{r}
+# grangertest(y=house.daily.trends$diff_tweet.count,
+#             x=house.daily.trends$diff_inc.deaths.lead.7,
+#             order=16)
+# 
+# grangertest(y=house.daily.trends$diff_tweet.count,
+#             x=house.daily.trends$diff_inc.deaths.lead.14,
+#             order=16)
+
+
+sddgt <- sd.daily.trends[sddts_stationarity$variable[1:length(sddts_stationarity$variable)-1]] %>% 
+  pivot_longer(contains("deaths"), names_to="x.variable", values_to="x.value") %>% 
+  pivot_longer(!(contains("deaths") | contains("x")), names_to="y.variable", values_to="y.value")
+
+x_vars <- unique(sddgt$x.variable)
+y_vars <- unique(sddgt$y.variable)
+
+sddgr <- data.frame(x=NA, y=NA, order=NA, granger.p=NA, rev.granger.p=NA)
+
+for(i in seq_along(x_vars)){
+  for(j in seq_along(y_vars)){
+    order <- max(sdd_lags$max.lag[sdd_lags$variable==str_remove(x_vars[i],"diff_")],
+                 sdd_lags$max.lag[sdd_lags$variable==str_remove(y_vars[j], "diff_")])
+    
+    #order <- 20
+    
+    x_vals <- (sddgt %>% filter(x.variable==x_vars[i] & y.variable==y_vars[j]))$x.value
+    y_vals <- (sddgt %>% filter(x.variable==x_vars[i] & y.variable==y_vars[j]))$y.value
+    
+    gt <- grangertest(x=x_vals, y=y_vals, order=order)
+    
+    # Test reverse
+    gt_rev <- grangertest(y=x_vals, x=y_vals, order=order)
+    
+    sddgr <- rbind(sddgr,c(x=x_vars[i], y=y_vars[j], order=order, 
+                         granger.p=round(gt$`Pr(>F)`[[2]],3), 
+                         rev.granger.p=round(gt_rev$`Pr(>F)`[[2]],3)))
+  }
+}
+
+sddgr <- sddgr %>% mutate(granger.sig = case_when(granger.p <= 0.05 ~ T, T ~ F),
+                        rev.granger.sig = case_when(rev.granger.p <= 0.05 ~ T, T ~ F)
+                        )
+sddgr
+```
+
+
+
+
+
+
+
+# Senate Republicans Daily Aggregate Time Series
+
+## Decompose daily series to get trends
+```{r}
+# Get variables needed
+temp <- data.frame(
+    date = (chamber.party.daily.covid.tweets %>% 
+              filter(label=="Senate Republicans"))$date,
+    tweet.count = (chamber.party.daily.covid.tweets %>% 
+                     filter(label=="Senate Republicans"))$covid.tweet.count,
+    tweet.share.all = (chamber.party.daily.covid.tweets %>% 
+                         filter(label=="Senate Republicans"))$covid.tweet.share,
+    group5.count = (chamber.party.daily.covid.tweets %>% 
+                      filter(label=="Senate Republicans"))$group5.tweet.count,
+    group5.share.covid = (chamber.party.daily.covid.tweets %>% 
+                            filter(label=="Senate Republicans"))$group5.tweet.covid.share,
+    group5.share.all = (chamber.party.daily.covid.tweets %>% 
+                          filter(label=="Senate Republicans"))$group5.tweet.all.share,
+    group6.count = (chamber.party.daily.covid.tweets %>% 
+                      filter(label=="Senate Republicans"))$group6.tweet.count,
+    group6.share.covid = (chamber.party.daily.covid.tweets %>% 
+                            filter(label=="Senate Republicans"))$group6.tweet.covid.share,
+    group6.share.all = (chamber.party.daily.covid.tweets %>% 
+                          filter(label=="Senate Republicans"))$group6.tweet.all.share,
+    inc.deaths = (chamber.party.daily.covid.tweets %>% 
+                    filter(label=="Senate Republicans"))$national_incremental_deaths,
+    inc.deaths.lead.7 = Lag((chamber.party.daily.covid.tweets %>% 
+                               filter(label=="Senate Republicans"))$national_incremental_deaths, shift=-7),
+    inc.deaths.lead.10 = Lag((chamber.party.daily.covid.tweets %>% 
+                                filter(label=="Senate Republicans"))$national_incremental_deaths, shift=-10),
+    inc.cases = (chamber.party.daily.covid.tweets %>% filter(label=="Senate Republicans"))$national_incremental_cases
+)
+
+# Convert to ts objects and decompose (hadts=House Aggregate Daily Time Series)
+# NOTE: Assuming additive type
+sradts <- lapply(lapply(as.list(temp[2:13]), ts, frequency=7),decompose,type="additive")
+
+names(sradts) <- c("tweet.count",
+                  "tweet.share.all",
+                  "group5.count",
+                  "group5.share.covid",
+                  "group5.share.all",
+                  "group6.count",
+                  "group6.share.covid",
+                  "group6.share.all",
+                  "inc.deaths",
+                  "inc.deaths.lead.7",
+                  "inc.deaths.lead.14",
+                  "inc.cases")
+
+# Plot to get a look at decompositions
+for(i in seq_along(sradts)){
+  plot(sradts[[i]])
+}
+
+# Put the decomposed trends into a df
+sr.daily.trends <- as.data.frame(sapply(sradts,`[[`,"trend"))
+sr.daily.trends$date <- (chamber.party.daily.covid.tweets %>% filter(label=="Senate Republicans"))$date
+
+# Get differences
+sr.daily.trends <- sr.daily.trends %>% 
+  mutate(across(1:12, .fns=diff.xts, na.pad=T, .names="diff_{col}"))
+```
+## Visualize trends briefly (USE TO INFORM GRANGER!)
+```{r}
+ggplot(data=sr.daily.trends, aes(x=date)) +
+  #geom_line(aes(y=tweet.count/600), color="black") + # Maybe w/ cases
+  geom_line(aes(y=tweet.share.all), color="gray42") + # Maybe w/ cases
+  geom_line(aes(y=inc.deaths/1700), color="darkorange", linetype="dashed") +
+  #geom_line(aes(y=Lag(inc.deaths/1700,shift=-8)), color="black", linetype="dashed") + 
+  geom_line(aes(y=inc.cases/100000), color="darkred", linetype="dashed") +
+  theme_light()
+
+ggplot(data=sr.daily.trends, aes(x=date)) +
+  #geom_line(aes(y=group5.count/200), color="darkblue") + # Maybe synch w/ cases
+  #geom_line(aes(y=group5.share.covid), color="blue") + # No synch
+  geom_line(aes(y=group5.share.all*5), color="turquoise") + # Maybe with cases
+  geom_line(aes(y=inc.deaths/2000), color="darkorange", linetype="dashed") +
+  geom_line(aes(y=inc.cases/170000), color="darkred", linetype="dashed") +
+  theme_light()
+
+ggplot(data=sr.daily.trends, aes(x=date)) +
+  #geom_line(aes(y=group6.count/15), color="darkblue") + # Synchrony with cases maybe
+  #geom_line(aes(y=group6.share.covid*15), color="blue") + # Looks like no synchrony
+  geom_line(aes(y=group6.share.all*30), color="turquoise") + # Synchrony maybe
+  geom_line(aes(y=inc.deaths/2000), color="darkorange", linetype="dashed") +
+  geom_line(aes(y=inc.cases/170000), color="darkred", linetype="dashed") +
+  theme_light()
+
+```
+## Test trends for stationarity
+```{r, warn=F}
+t1 <- sr.daily.trends %>% pivot_longer(-date,names_to="variable") %>% drop_na() %>% 
+  group_by(variable) %>% 
+  summarize(adf.p=ifelse(n() <= 3,NA, adf.test(value)$p.value)) %>% 
+  mutate(adf.p.sig = case_when(adf.p <= 0.05 ~ T, T ~ F))
+
+
+t2 <- sr.daily.trends %>% pivot_longer(-date,names_to="variable") %>% drop_na() %>% 
+  group_by(variable) %>% 
+  summarize(pp.p=ifelse(n() <= 3,NA, pp.test(value)$p.value)) %>% 
+  mutate(pp.p.sig = case_when(pp.p <= 0.05 ~ T, T ~ F))
+
+t3 <- sr.daily.trends %>% pivot_longer(-date,names_to="variable") %>% drop_na() %>% 
+  group_by(variable) %>% 
+  summarize(kpss.p=ifelse(n() <= 3,NA, kpss.test(value)$p.value)) %>% 
+  mutate(kpss.p.sig = case_when(kpss.p > 0.05 ~ T, T ~ F))
+
+srdts_stationarity <- left_join(left_join(t1, t2),t3) %>% 
+  mutate(passes.all=adf.p.sig & pp.p.sig & kpss.p.sig) %>% filter(passes.all==T)
+
+srdts_stationarity
+rm(t1,t2,t3)
+```
+
+## Determine proper order for Granger test
+Following: https://davegiles.blogspot.com/2011/04/testing-for-granger-causality.html
+```{r}
+# Get the variables that passed stationarity testing (but in their undiffed form)
+# Leaving out differenced variable at end that passed
+srd_lags <- sr.daily.trends[str_remove_all(
+  srdts_stationarity$variable[1:length(srdts_stationarity$variable)],
+  "diff_")] %>% pivot_longer(everything(), names_to="variable") %>% 
+  group_by(variable) %>% 
+  summarize(min.AIC.order=which.min(VARselect(na.omit(value), lag.max=60)$criteria[1,]),
+            min.HQ.order=which.min(VARselect(na.omit(value), lag.max=60)$criteria[2,]),
+            min.SC.order=which.min(VARselect(na.omit(value), lag.max=60)$criteria[3,]),
+            min.FPE.order=which.min(VARselect(na.omit(value), lag.max=60)$criteria[4,]),
+            ) %>% 
+  rowwise() %>% 
+  mutate(max.lag = max(across(-variable)))
+
+srd_lags
+```
+
+## Test for Granger causality
+```{r}
+# grangertest(y=house.daily.trends$diff_tweet.count,
+#             x=house.daily.trends$diff_inc.deaths.lead.7,
+#             order=16)
+# 
+# grangertest(y=house.daily.trends$diff_tweet.count,
+#             x=house.daily.trends$diff_inc.deaths.lead.14,
+#             order=16)
+
+
+srdgt <- sr.daily.trends[srdts_stationarity$variable[1:length(srdts_stationarity$variable)]] %>% 
+  pivot_longer(contains("deaths"), names_to="x.variable", values_to="x.value") %>% 
+  pivot_longer(!(contains("deaths") | contains("x")), names_to="y.variable", values_to="y.value")
+
+x_vars <- unique(srdgt$x.variable)
+y_vars <- unique(srdgt$y.variable)
+
+srdgr <- data.frame(x=NA, y=NA, order=NA, granger.p=NA, rev.granger.p=NA)
+
+for(i in seq_along(x_vars)){
+  for(j in seq_along(y_vars)){
+    order <- max(srd_lags$max.lag[srd_lags$variable==str_remove(x_vars[i],"diff_")],
+                 srd_lags$max.lag[srd_lags$variable==str_remove(y_vars[j], "diff_")])
+    
+    #order <- 20
+    
+    x_vals <- (srdgt %>% filter(x.variable==x_vars[i] & y.variable==y_vars[j]))$x.value
+    y_vals <- (srdgt %>% filter(x.variable==x_vars[i] & y.variable==y_vars[j]))$y.value
+    
+    gt <- grangertest(x=x_vals, y=y_vals, order=order)
+    
+    # Test reverse
+    gt_rev <- grangertest(y=x_vals, x=y_vals, order=order)
+    
+    srdgr <- rbind(srdgr,c(x=x_vars[i], y=y_vars[j], order=order, 
+                         granger.p=round(gt$`Pr(>F)`[[2]],3), 
+                         rev.granger.p=round(gt_rev$`Pr(>F)`[[2]],3)))
+  }
+}
+
+srdgr <- srdgr %>% mutate(granger.sig = case_when(granger.p <= 0.05 ~ T, T ~ F),
+                        rev.granger.sig = case_when(rev.granger.p <= 0.05 ~ T, T ~ F)
+                        )
+srdgr
+```
+
+
+
+
+
+
+
+
+
+# Visualize significant Senate Republican Granger Test Variables
+```{r}
+ggplot(data=sr.daily.trends, aes(x=date)) +
+  geom_line(aes(y=group6.share.covid), color="gray42") +
+  geom_line(aes(y=inc.deaths/12000), color="darkorange", linetype="dashed") +
+  geom_line(aes(y=inc.deaths.lead.7/12000), color="darkred", linetype="dashed") +
+  geom_line(aes(y=inc.deaths.lead.14/12000), color="pink", linetype="dashed") +
+  theme_light()
+
+ggplot(data=sr.daily.trends, aes(x=date)) +
+  geom_line(aes(y=diff_group6.share.covid), color="gray42") +
+  #geom_line(aes(y=diff_inc.deaths/2000), color="darkorange", linetype="dashed") +
+  geom_line(aes(y=diff_inc.deaths.lead.7/2000), color="darkred", linetype="dashed") +
+  #geom_line(aes(y=diff_inc.deaths.lead.14/12000), color="pink", linetype="dashed") +
+  ylim(c(-0.05,.05)) +
+  theme_light()
+```
+

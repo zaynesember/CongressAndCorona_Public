@@ -1,0 +1,26 @@
+---
+title: "COVID Restrictions by State"
+author: "Zayne Sember"
+output: html_notebook
+---
+
+```{r, message=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(readxl)
+```
+
+```{r}
+restrictions <- read_excel("Auxiliary Data/Restrictions/AARP_State_Restrictions_Long.xlsx")
+
+restrictions %>% 
+  select(date_3, level_3) %>%
+  gather(key=level_3, value=date_3) %>% 
+  ggplot(aes(x=date_3,fill=level_3)) + 
+  geom_bar(position="dodge") +
+  xlab("") +
+  ylab("Frequency") +
+  ggtitle("COVID-19 Restriction Level") +
+  theme_bw()
+```
+Throughout the analyzed dates, most states impose restrictions at the state-level, presumably informed by state-level numbers. There is an uptick in states basing restrictions on county numbers.
